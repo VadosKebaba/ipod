@@ -41,11 +41,12 @@ var DefaultReportDefs = ReportDefs{
 	ReportDef{ID: 0x03, Len: 20, Dir: ReportDirAccIn},
 	ReportDef{ID: 0x04, Len: 63, Dir: ReportDirAccIn},
 
-	ReportDef{ID: 0x05, Len: 8, Dir: ReportDirAccIn},
-	ReportDef{ID: 0x06, Len: 10, Dir: ReportDirAccIn},
-	ReportDef{ID: 0x07, Len: 14, Dir: ReportDirAccIn},
-	ReportDef{ID: 0x08, Len: 20, Dir: ReportDirAccIn},
-	ReportDef{ID: 0x09, Len: 63, Dir: ReportDirAccIn},
+	// Output reports in ipod-gadget's descriptor: Pick() must never send these
+	ReportDef{ID: 0x05, Len: 8, Dir: ReportDirAccOut},
+	ReportDef{ID: 0x06, Len: 10, Dir: ReportDirAccOut},
+	ReportDef{ID: 0x07, Len: 14, Dir: ReportDirAccOut},
+	ReportDef{ID: 0x08, Len: 20, Dir: ReportDirAccOut},
+	ReportDef{ID: 0x09, Len: 63, Dir: ReportDirAccOut},
 }
 
 var LegacyReportDefs = ReportDefs{

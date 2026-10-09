@@ -183,3 +183,35 @@ func BenchmarkEncoder(b *testing.B) {
 		e.WriteFrame(frame)
 	}
 }
+
+// Frames sent to the accessory must only use the descriptor's Input reports
+// (iPod -> accessory). An Output report id on the interrupt IN endpoint is not
+// a valid report for the accessory's HID parser.
+func TestEncoderUsesInputReports(t *testing.T) {
+	tests := []struct {
+		name     string
+		defs     hid.ReportDefs
+		inputIDs map[byte]bool
+	}{
+		// ipod-gadget's full speed descriptor: 1-4 Input, 5-9 Output
+		{"default", hid.DefaultReportDefs, map[byte]bool{1: true, 2: true, 3: true, 4: true}},
+		// high speed descriptor of a real iPod: 1-12 Input, 13-21 Output
+		{"legacy", hid.LegacyReportDefs, map[byte]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
+			7: true, 8: true, 9: true, 10: true, 11: true, 12: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for size := 1; size <= 2000; size++ {
+				w := &testReportWriter{}
+				if err := hid.NewEncoder(w, tt.defs).WriteFrame(make([]byte, size)); err != nil {
+					t.Fatalf("frame of %d bytes: %v", size, err)
+				}
+				for _, r := range w.reports {
+					if !tt.inputIDs[r.ID] {
+						t.Fatalf("frame of %d bytes sent with report id %d, which is not an Input report", size, r.ID)
+					}
+				}
+			}
+		})
+	}
+}
