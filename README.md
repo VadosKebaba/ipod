@@ -25,6 +25,8 @@ At least it's finally working in my own car :)
 GO111MODULE=on go build github.com/oandrew/ipod/cmd/ipod
 # or cross compiling
 GO111MODULE=on GOOS=linux GOARCH=arm GOARM=6 go build github.com/oandrew/ipod/cmd/ipod
+# Raspberry Pi 5 / any 64-bit Raspberry Pi OS (static binary, from a checkout of this repo)
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 
 # with debug logging
 ./ipod -d serve /dev/iap0
