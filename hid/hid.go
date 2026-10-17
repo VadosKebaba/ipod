@@ -89,6 +89,7 @@ func (e *Decoder) ReadFrame() ([]byte, error) {
 	buf := &e.buf
 	buf.Reset()
 	done := false
+	inFrame := false
 	for !done {
 		report, err := e.r.ReadReport()
 		if err != nil {
@@ -107,10 +108,16 @@ func (e *Decoder) ReadFrame() ([]byte, error) {
 			buf.Write(reportData)
 			done = true
 		case LinkControlMoreToFollow:
-			buf.Reset()
+			// Some accessories (the Clarion X9U6 in a 2014 Infiniti Q60) mark every
+			// report but the last as a first one. Mid-frame, read it as a continuation.
+			if !inFrame {
+				buf.Reset()
+			}
 			buf.Write(reportData)
+			inFrame = true
 		case LinkControlContinue | LinkControlMoreToFollow:
 			buf.Write(reportData)
+			inFrame = true
 		case LinkControlContinue:
 			buf.Write(reportData)
 			done = true

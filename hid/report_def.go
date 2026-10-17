@@ -49,6 +49,13 @@ var DefaultReportDefs = ReportDefs{
 	ReportDef{ID: 0x09, Len: 63, Dir: ReportDirAccOut},
 }
 
+// BigOutReportDefs is DefaultReportDefs plus one 255-byte Output report 0x0A, for
+// ipod-gadget's hid_desc=bigout: a long frame from the accessory fits in one report,
+// using only 1-byte Report Count items. Pick() never sends it (accessory -> iPod only).
+var BigOutReportDefs = append(append(ReportDefs{}, DefaultReportDefs...),
+	ReportDef{ID: 0x0A, Len: 255, Dir: ReportDirAccOut},
+)
+
 var LegacyReportDefs = ReportDefs{
 	ReportDef{ID: 0x01, Len: 5, Dir: ReportDirAccIn},
 	ReportDef{ID: 0x02, Len: 9, Dir: ReportDirAccIn},

@@ -54,6 +54,13 @@ type UsageError struct {
 
 var hidReportDefs = hid.DefaultReportDefs
 
+// --hid layouts, each matching an ipod-gadget g_ipod_hid hid_desc of the same name
+var hidLayouts = map[string]hid.ReportDefs{
+	"default": hid.DefaultReportDefs,
+	"legacy":  hid.LegacyReportDefs,
+	"bigout":  hid.BigOutReportDefs,
+}
+
 func main() {
 	logOut := os.Stdout
 	log.Formatter = &TextFormatter{
@@ -80,9 +87,14 @@ func main() {
 			Name:  "debug, d",
 			Usage: "verbose logging",
 		},
+		cli.StringFlag{
+			Name:  "hid",
+			Value: "default",
+			Usage: "hid report layout: default, legacy or bigout (must match g_ipod_hid hid_desc)",
+		},
 		cli.BoolFlag{
 			Name:  "legacy, l",
-			Usage: "use legacy hid descriptor",
+			Usage: "same as --hid=legacy",
 		},
 	}
 
@@ -103,9 +115,19 @@ func main() {
 			log.SetLevel(logrus.DebugLevel)
 		}
 
+		layout := c.GlobalString("hid")
 		if c.GlobalBool("legacy") {
-			hidReportDefs = hid.LegacyReportDefs
+			if c.GlobalIsSet("hid") && layout != "legacy" {
+				return fmt.Errorf("--legacy and --hid=%s disagree", layout)
+			}
+			layout = "legacy"
 		}
+		defs, ok := hidLayouts[layout]
+		if !ok {
+			return fmt.Errorf("--hid=%s: expected default, legacy or bigout", layout)
+		}
+		hidReportDefs = defs
+		log.Infof("hid report layout: %s", layout)
 
 		return nil
 	}

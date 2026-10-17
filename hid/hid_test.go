@@ -3,10 +3,12 @@ package hid_test
 import (
 	"io"
 	"io/ioutil"
+	"os"
 	"reflect"
 	"testing"
 
 	"github.com/oandrew/ipod/hid"
+	"github.com/oandrew/ipod/trace"
 )
 
 type testReportWriter struct {
@@ -195,6 +197,8 @@ func TestEncoderUsesInputReports(t *testing.T) {
 	}{
 		// ipod-gadget's full speed descriptor: 1-4 Input, 5-9 Output
 		{"default", hid.DefaultReportDefs, map[byte]bool{1: true, 2: true, 3: true, 4: true}},
+		// hid_desc=bigout: the same plus Output 0x0A, which must never be sent
+		{"bigout", hid.BigOutReportDefs, map[byte]bool{1: true, 2: true, 3: true, 4: true}},
 		// high speed descriptor of a real iPod: 1-12 Input, 13-21 Output
 		{"legacy", hid.LegacyReportDefs, map[byte]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
 			7: true, 8: true, 9: true, 10: true, 11: true, 12: true}},
@@ -213,5 +217,115 @@ func TestEncoderUsesInputReports(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// iapFrame returns an iAP frame of n bytes (0x55, length, payload, checksum) with a
+// recognisable payload.
+func iapFrame(n int) []byte {
+	f := make([]byte, n)
+	f[0], f[1] = 0x55, byte(n-3)
+	for i := 2; i < n-1; i++ {
+		f[i] = byte(i)
+	}
+	return f
+}
+
+func TestDecoderBigOutReport(t *testing.T) {
+	// hid_desc=bigout: a 251-byte frame from the accessory arrives in one 0x0A report
+	frame := iapFrame(251)
+	data := make([]byte, 254) // Len 255 = link control + 254 bytes, padded
+	copy(data, frame)
+	report := hid.Report{ID: 0x0A, LinkControl: hid.LinkControlDone, Data: data}
+	r := &testReportReader{reports: []hid.Report{report}}
+	got, err := hid.NewDecoder(r, hid.BigOutReportDefs).ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got[:len(frame)], frame) {
+		t.Fatalf("frame not decoded intact")
+	}
+	r = &testReportReader{reports: []hid.Report{report}}
+	if _, err := hid.NewDecoder(r, hid.DefaultReportDefs).ReadFrame(); err == nil || err == io.EOF {
+		t.Fatalf("report 0x0A accepted without the bigout layout: %v", err)
+	}
+}
+
+// split cuts a frame into 62-byte report payloads (report 0x09 of the default layout).
+func split(frame []byte) [][]byte {
+	var parts [][]byte
+	for len(frame) > 62 {
+		parts = append(parts, frame[:62])
+		frame = frame[62:]
+	}
+	return append(parts, frame)
+}
+
+func TestDecoderMoreToFollowMidFrame(t *testing.T) {
+	// How the Clarion X9U6 (2014 Infiniti Q60) splits a long frame: every report but the
+	// last is marked 0x02, "first, more to follow", instead of 0x03 for the middle ones.
+	frame := iapFrame(251)
+	parts := split(frame)
+	var reports []hid.Report
+	for i, p := range parts {
+		lc := hid.LinkControlMoreToFollow
+		if i == len(parts)-1 {
+			lc = hid.LinkControlContinue
+		}
+		reports = append(reports, hid.Report{ID: 0x09, LinkControl: lc, Data: p})
+	}
+	// and a correctly marked short frame after it must still start a frame of its own
+	short := iapFrame(20)
+	reports = append(reports,
+		hid.Report{ID: 0x09, LinkControl: hid.LinkControlMoreToFollow, Data: short[:10]},
+		hid.Report{ID: 0x09, LinkControl: hid.LinkControlContinue, Data: short[10:]})
+
+	d := hid.NewDecoder(&testReportReader{reports: reports}, hid.DefaultReportDefs)
+	got, err := d.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, frame) {
+		t.Fatalf("long frame: got %d bytes, want the %d-byte frame", len(got), len(frame))
+	}
+	got, err = d.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, short) {
+		t.Fatalf("short frame after it: got % x", got)
+	}
+}
+
+// The raw HID trace of the failing session in the Q60 (ipod-gadget
+// doc/traces/q60-clarion-x9u6-auth-fail.trace). Skipped until it is copied here.
+func TestQ60ClarionTrace(t *testing.T) {
+	f, err := os.Open("testdata/q60-clarion-x9u6-auth-fail.trace")
+	if err != nil {
+		t.Skip("no testdata/q60-clarion-x9u6-auth-fail.trace")
+	}
+	defer f.Close()
+	in := trace.NewTraceDirReader(trace.NewReader(f), trace.DirIn)
+	d := hid.NewDecoder(hid.NewReportReader(in), hid.DefaultReportDefs)
+	longest := 0
+	for {
+		frame, err := d.ReadFrame()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(frame) > longest {
+			longest = len(frame)
+		}
+	}
+	if longest == 0 {
+		t.Skip("trace file is empty")
+	}
+	// RetDevAuthenticationInfo is a 251-byte frame; the head unit drops 4 bytes of it, but
+	// its reports must still come out as one frame rather than as separate pieces
+	if longest < 240 {
+		t.Fatalf("longest frame %d bytes: RetDevAuthenticationInfo was not assembled", longest)
 	}
 }
