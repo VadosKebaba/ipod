@@ -21,7 +21,19 @@ const (
 
 type PacketReader struct {
 	frame []byte
+
+	// LenientAuth accepts RetDevAuthenticationInfo (0x15) and RetDevAuthenticationSignature
+	// (0x18) packets that are short or fail their checksum, padding a short payload with
+	// zeros. Some accessories damage these long packets when they split them over HID
+	// reports, and an iPod emulator never verifies the certificate or signature they carry:
+	// what the handler acts on is all at the start. Every other packet stays strict.
+	LenientAuth bool
+	// OnLenient, if set, is called for every packet accepted only because of LenientAuth,
+	// with the bytes received and the bytes declared, both counting the start byte.
+	OnLenient func(cmd byte, got, want int)
 }
+
+var errInvalidChecksum = errors.New("invalid checksum")
 
 func NewPacketReader(frame []byte) *PacketReader {
 	return &PacketReader{
@@ -44,21 +56,47 @@ func parseHeader(data []byte) (payOff, payLen int, err error) {
 	return
 }
 
-func parsePacket(data []byte) (int, []byte, error) {
+// parsePacket parses the packet at the start of data (after its start byte). n is the
+// number of bytes the packet takes up, on error too, so that a damaged packet is
+// skipped whole rather than searched for start bytes of packets nobody sent.
+func parsePacket(data []byte) (n int, payload []byte, err error) {
 	payOff, payLen, err := parseHeader(data)
 	if err != nil {
-		return 0, nil, err
+		return len(data), nil, err
 	}
 	pktLen := payOff + payLen + 1
-	pkt := data[:pktLen]
-	if len(pkt) < pktLen {
-		return pktLen, nil, io.ErrUnexpectedEOF
+	// before slicing: data[:pktLen] past len(data) doesn't fail while it is within
+	// cap(data), it reads stale bytes of the underlying buffer (and panics past cap)
+	if len(data) < pktLen {
+		return len(data), nil, io.ErrUnexpectedEOF
 	}
+	pkt := data[:pktLen]
 	if Checksum(pkt) != 0x00 {
-		return pktLen, nil, errors.New("invalid checksum")
+		return pktLen, nil, errInvalidChecksum
 	}
 
 	return pktLen, pkt[payOff : payOff+payLen], nil
+}
+
+// lenientAuthPayload returns the payload of a damaged packet that LenientAuth accepts:
+// RetDevAuthenticationInfo or RetDevAuthenticationSignature, zero padded to the
+// declared length.
+func lenientAuthPayload(data []byte) (cmd byte, payload []byte, want int, ok bool) {
+	payOff, payLen, err := parseHeader(data)
+	if err != nil || len(data) < payOff+2 || data[payOff] != LingoGeneralID {
+		return 0, nil, 0, false
+	}
+	cmd = data[payOff+1]
+	if cmd != 0x15 && cmd != 0x18 {
+		return 0, nil, 0, false
+	}
+	payload = make([]byte, payLen)
+	end := payOff + payLen
+	if end > len(data) {
+		end = len(data)
+	}
+	copy(payload, data[payOff:end])
+	return cmd, payload, payOff + payLen + 1, true
 }
 
 func (pd *PacketReader) ReadPacket() ([]byte, error) {
@@ -66,12 +104,20 @@ func (pd *PacketReader) ReadPacket() ([]byte, error) {
 	if next == -1 {
 		return nil, io.EOF
 	}
-	pd.frame = pd.frame[next+1:]
-	pktLen, payload, err := parsePacket(pd.frame)
+	data := pd.frame[next+1:]
+	n, payload, err := parsePacket(data)
+	pd.frame = data[n:]
+	if err != nil && pd.LenientAuth && (err == io.ErrUnexpectedEOF || err == errInvalidChecksum) {
+		if cmd, lenient, want, ok := lenientAuthPayload(data); ok {
+			if pd.OnLenient != nil {
+				pd.OnLenient(cmd, 1+n, 1+want)
+			}
+			return lenient, nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	pd.frame = pd.frame[pktLen:]
 	return payload, nil
 }
 

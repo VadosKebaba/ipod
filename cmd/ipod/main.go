@@ -54,6 +54,19 @@ type UsageError struct {
 
 var hidReportDefs = hid.DefaultReportDefs
 
+// --lenient-auth: accept damaged RetDevAuthenticationInfo/Signature packets
+var lenientAuth bool
+
+// newPacketReader reads the packets of one frame, honouring --lenient-auth.
+func newPacketReader(frame []byte) *ipod.PacketReader {
+	pr := ipod.NewPacketReader(frame)
+	pr.LenientAuth = lenientAuth
+	pr.OnLenient = func(cmd byte, got, want int) {
+		log.Warnf("lenient: accepted damaged frame cmd=0x%02x got=%d want=%d chk=bad", cmd, got, want)
+	}
+	return pr
+}
+
 // --hid layouts, each matching an ipod-gadget g_ipod_hid hid_desc of the same name
 var hidLayouts = map[string]hid.ReportDefs{
 	"default": hid.DefaultReportDefs,
@@ -96,6 +109,11 @@ func main() {
 			Name:  "legacy, l",
 			Usage: "same as --hid=legacy",
 		},
+		cli.BoolFlag{
+			Name: "lenient-auth",
+			Usage: "accept RetDevAuthenticationInfo/Signature packets that are short or fail their checksum " +
+				"(the certificate and signature are never verified anyway)",
+		},
 	}
 
 	app.ExitErrHandler = func(c *cli.Context, err error) {
@@ -128,6 +146,10 @@ func main() {
 		}
 		hidReportDefs = defs
 		log.Infof("hid report layout: %s", layout)
+		lenientAuth = c.GlobalBool("lenient-auth")
+		if lenientAuth {
+			log.Warn("lenient auth: damaged authentication packets from the accessory are accepted")
+		}
 
 		return nil
 	}
@@ -364,7 +386,7 @@ func processFrames(frameTransport ipod.FrameReadWriter) {
 			continue
 		}
 
-		packetReader := ipod.NewPacketReader(inFrame)
+		packetReader := newPacketReader(inFrame)
 		inCmdBuf := ipod.CmdBuffer{}
 		for {
 			inPacket, err := packetReader.ReadPacket()
@@ -472,7 +494,7 @@ func dumpTrace(tr *trace.Reader) {
 			continue
 		}
 
-		packetReader := ipod.NewPacketReader(frame)
+		packetReader := newPacketReader(frame)
 		for {
 			packet, err := packetReader.ReadPacket()
 			if err == io.EOF {

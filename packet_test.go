@@ -2,6 +2,7 @@ package ipod_test
 
 import (
 	"bytes"
+	"io"
 	"reflect"
 	"testing"
 
@@ -123,5 +124,96 @@ func BenchmarkPacketWriter(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		pw := ipod.NewPacketWriter()
 		pw.WritePacket(packet)
+	}
+}
+
+func packetOf(payload []byte) []byte {
+	w := ipod.NewPacketWriter()
+	w.WritePacket(payload)
+	return append([]byte(nil), w.Bytes()...)
+}
+
+// A packet whose bytes stop short of its declared length must not be completed from
+// whatever is left in the buffer past the end of the frame.
+func TestReadPacketShortNotReadPastEnd(t *testing.T) {
+	full := packetOf([]byte{0x00, 0x07}) // RequestiPodName: 55 02 00 07 f7
+	buf := make([]byte, len(full), 64)
+	copy(buf, full)
+	short := buf[:len(full)-1] // the checksum is still in the buffer, just past len
+	if p, err := ipod.NewPacketReader(short).ReadPacket(); err != io.ErrUnexpectedEOF {
+		t.Fatalf("got % x, %v; want io.ErrUnexpectedEOF", p, err)
+	}
+}
+
+// A packet that fails its checksum is skipped whole: a start byte inside it is data,
+// not the start of another packet.
+func TestReadPacketSkipsDamagedPacket(t *testing.T) {
+	inner := []byte{0x55, 0x02, 0x00, 0x07, 0xf7} // a valid RequestiPodName, as data
+	frame := packetOf(append([]byte{0x00, 0x15, 0x02, 0x00, 0x00, 0x00}, inner...))
+	frame[len(frame)-1] ^= 0xff
+	r := ipod.NewPacketReader(frame)
+	if _, err := r.ReadPacket(); err == nil {
+		t.Fatal("damaged packet accepted")
+	}
+	if p, err := r.ReadPacket(); err != io.EOF {
+		t.Fatalf("read % x (%v) from inside the damaged packet", p, err)
+	}
+}
+
+func TestReadPacketLenientAuth(t *testing.T) {
+	// RetDevAuthenticationInfo: trx 1, v2.0, section 0 of 3, certificate data
+	info := packetOf(append([]byte{0x00, 0x15, 0x00, 0x01, 0x02, 0x00, 0x00, 0x03}, bytes.Repeat([]byte{0xab}, 200)...))
+	// RetDevAuthenticationSignature: trx 5, 128 bytes of signature
+	sig := packetOf(append([]byte{0x00, 0x18, 0x00, 0x05}, bytes.Repeat([]byte{0xcd}, 128)...))
+	name := packetOf([]byte{0x00, 0x07})
+
+	dropped := func(p []byte, at, n int) []byte { // n bytes lost in the middle, like the Q60
+		return append(append([]byte(nil), p[:at]...), p[at+n:]...)
+	}
+	badSum := func(p []byte) []byte {
+		q := append([]byte(nil), p...)
+		q[len(q)-2] ^= 0x01
+		return q
+	}
+
+	tests := []struct {
+		name     string
+		frame    []byte
+		lenient  bool
+		wantErr  bool
+		wantLen  int // payload length when accepted
+		wantGot  int // OnLenient got/want, 0 if it must not be called
+		wantWant int
+	}{
+		{"info intact", info, true, false, 208, 0, 0},
+		{"info short, strict", dropped(info, 70, 4), false, true, 0, 0, 0},
+		{"info short, lenient", dropped(info, 70, 4), true, false, 208, 207, 211},
+		{"info bad checksum, strict", badSum(info), false, true, 0, 0, 0},
+		{"info bad checksum, lenient", badSum(info), true, false, 208, 211, 211},
+		{"signature short, lenient", dropped(sig, 66, 2), true, false, 132, 133, 135},
+		{"other command bad checksum, lenient", badSum(name), true, true, 0, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ipod.NewPacketReader(tt.frame)
+			r.LenientAuth = tt.lenient
+			var got, want int
+			r.OnLenient = func(cmd byte, g, w int) { got, want = g, w }
+			p, err := r.ReadPacket()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				if len(p) != tt.wantLen {
+					t.Fatalf("payload %d bytes, want %d", len(p), tt.wantLen)
+				}
+				if !bytes.Equal(p[:4], tt.frame[2:6]) {
+					t.Fatalf("payload starts % x, want % x", p[:4], tt.frame[2:6])
+				}
+			}
+			if got != tt.wantGot || want != tt.wantWant {
+				t.Fatalf("OnLenient(got=%d, want=%d), want (%d, %d)", got, want, tt.wantGot, tt.wantWant)
+			}
+		})
 	}
 }

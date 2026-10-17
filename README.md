@@ -44,6 +44,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 # must match the descriptor ipod-gadget offers (g_ipod_hid hid_desc=); --legacy = --hid=legacy
 ./ipod -d --hid=bigout serve /dev/iap0
 
+# accept RetDevAuthenticationInfo/Signature packets that arrive short or with a bad
+# checksum (some head units damage them; they are never verified). Other packets stay strict.
+./ipod -d --lenient-auth serve /dev/iap0
+
 ```
 
 Client app godoc https://godoc.org/github.com/oandrew/ipod/cmd/ipod
