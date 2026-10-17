@@ -40,6 +40,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 # view a trace file
 ./ipod -d view ./ipod.trace
 
+# HID report layout: default, legacy or bigout. Global flag (before the command), and it
+# must match the descriptor ipod-gadget offers (g_ipod_hid hid_desc=); --legacy = --hid=legacy
+./ipod -d --hid=bigout serve /dev/iap0
+
 ```
 
 Client app godoc https://godoc.org/github.com/oandrew/ipod/cmd/ipod
