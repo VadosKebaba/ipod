@@ -28,9 +28,7 @@ type DevExtRemote struct {
 	pos       uint32    // ms, at since
 	since     time.Time // pos is up to date at this time
 
-	enabled extremote.PlayStatusChanges // what the head unit asked for
-	changed extremote.PlayStatusChanges // to report at the next Notifications
-	sentSec uint32                      // last PlayStatusChangeTrackTimeSec value sent
+	n notifier
 }
 
 var _ Player = &DevExtRemote{}
@@ -52,9 +50,7 @@ func (d *DevExtRemote) Reset() {
 	d.length = extRemoteTrackLength
 	d.pos = 0
 	d.since = d.now()
-	d.enabled = 0
-	d.changed = 0
-	d.sentSec = ^uint32(0)
+	d.n.reset()
 }
 
 // advance brings pos up to now. Past the end of the track the next one starts (the same one,
@@ -72,7 +68,7 @@ func (d *DevExtRemote) advance() {
 	if pos >= uint64(d.length) {
 		d.track = int32((uint64(d.track) + pos/uint64(d.length)) % uint64(d.numTracks))
 		pos %= uint64(d.length)
-		d.changed |= 1 << extremote.PlayStatusChangeTrackIndex
+		d.n.mark(extremote.PlayStatusChangeTrackIndex)
 	}
 	d.pos = uint32(pos)
 }
@@ -82,21 +78,18 @@ func (d *DevExtRemote) setState(state extremote.PlayerState) {
 		return
 	}
 	d.state = state
-	d.changed |= 1 << extremote.PlayStatusChangeExtendedStatus
-	if state == extremote.PlayerStateStopped {
-		d.changed |= 1 << extremote.PlayStatusChangeStopped
-	}
+	d.n.markState(state)
 }
 
 func (d *DevExtRemote) setPos(pos uint32) {
 	d.pos = pos
-	d.changed |= 1<<extremote.PlayStatusChangeTrackTimeMs | 1<<extremote.PlayStatusChangeTrackTimeSec
+	d.n.mark(extremote.PlayStatusChangeTrackTimeMs, extremote.PlayStatusChangeTrackTimeSec)
 }
 
 func (d *DevExtRemote) setTrack(index int32) {
 	d.track = index
 	d.setPos(0)
-	d.changed |= 1 << extremote.PlayStatusChangeTrackIndex
+	d.n.mark(extremote.PlayStatusChangeTrackIndex)
 }
 
 func (d *DevExtRemote) PlaybackStatus() (trackLength, trackPos uint32, state extremote.PlayerState) {
@@ -159,9 +152,90 @@ func (d *DevExtRemote) SetPlayStatusNotifications(enabled extremote.PlayStatusCh
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.advance()
-	d.enabled = enabled
-	d.changed = 0
-	d.sentSec = ^uint32(0)
+	d.n.enable(enabled)
+}
+
+// Notifications returns the PlayStatusChangeNotifications to send now, to be called every
+// 500 ms as an iPod does: the enabled changes since the last call and, while playing, the
+// track position (the seconds one only when it changed).
+func (d *DevExtRemote) Notifications() []*extremote.PlayStatusChangeNotification {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.advance()
+	return d.n.due(d.state, d.track, d.pos)
+}
+
+// notifier is the PlayStatusChangeNotification bookkeeping of a Player: what the head unit
+// asked to be told, and what changed since it was last told.
+type notifier struct {
+	enabled extremote.PlayStatusChanges // what the head unit asked for
+	changed extremote.PlayStatusChanges // to report at the next due
+	sentSec uint32                      // last PlayStatusChangeTrackTimeSec value sent
+}
+
+func (n *notifier) reset() {
+	n.enable(0)
+}
+
+func (n *notifier) enable(enabled extremote.PlayStatusChanges) {
+	n.enabled = enabled
+	n.changed = 0
+	n.sentSec = ^uint32(0)
+}
+
+func (n *notifier) mark(codes ...extremote.PlayStatusChange) {
+	for _, c := range codes {
+		n.changed |= 1 << c
+	}
+}
+
+// markState: the play state changed to state.
+func (n *notifier) markState(state extremote.PlayerState) {
+	n.mark(extremote.PlayStatusChangeExtendedStatus)
+	if state == extremote.PlayerStateStopped {
+		n.mark(extremote.PlayStatusChangeStopped)
+	}
+}
+
+// markAll: everything is new to the head unit (another player took over).
+func (n *notifier) markAll(state extremote.PlayerState) {
+	n.mark(extremote.PlayStatusChangeTrackIndex, extremote.PlayStatusChangeTrackTimeMs,
+		extremote.PlayStatusChangeTrackTimeSec)
+	n.markState(state)
+}
+
+// due returns the notifications to send now for a player in state, at track index and
+// position pos: the enabled changes, plus the position while playing.
+func (n *notifier) due(state extremote.PlayerState, index int32, pos uint32) []*extremote.PlayStatusChangeNotification {
+	if state == extremote.PlayerStatePlaying {
+		n.mark(extremote.PlayStatusChangeTrackTimeMs)
+		if pos/1000 != n.sentSec {
+			n.mark(extremote.PlayStatusChangeTrackTimeSec)
+		}
+	}
+	due := n.changed & n.enabled
+	n.changed = 0
+
+	var notes []*extremote.PlayStatusChangeNotification
+	for code := extremote.PlayStatusChangeStopped; code <= extremote.PlayStatusChangeTrackTimeSec; code++ {
+		if !due.Has(code) {
+			continue
+		}
+		note := &extremote.PlayStatusChangeNotification{Status: code}
+		switch code {
+		case extremote.PlayStatusChangeTrackIndex:
+			note.Data = u32(uint32(index))
+		case extremote.PlayStatusChangeTrackTimeMs:
+			note.Data = u32(pos)
+		case extremote.PlayStatusChangeExtendedStatus:
+			note.Data = []byte{byte(extendedPlayStatus(state))}
+		case extremote.PlayStatusChangeTrackTimeSec:
+			n.sentSec = pos / 1000
+			note.Data = u32(n.sentSec)
+		}
+		notes = append(notes, note)
+	}
+	return notes
 }
 
 func extendedPlayStatus(state extremote.PlayerState) extremote.ExtendedPlayStatus {
@@ -179,42 +253,4 @@ func u32(v uint32) []byte {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b
-}
-
-// Notifications returns the PlayStatusChangeNotifications to send now, to be called every
-// 500 ms as an iPod does: the enabled changes since the last call and, while playing, the
-// track position (the seconds one only when it changed).
-func (d *DevExtRemote) Notifications() []*extremote.PlayStatusChangeNotification {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.advance()
-	if d.state == extremote.PlayerStatePlaying {
-		d.changed |= 1 << extremote.PlayStatusChangeTrackTimeMs
-		if d.pos/1000 != d.sentSec {
-			d.changed |= 1 << extremote.PlayStatusChangeTrackTimeSec
-		}
-	}
-	due := d.changed & d.enabled
-	d.changed = 0
-
-	var notes []*extremote.PlayStatusChangeNotification
-	for code := extremote.PlayStatusChangeStopped; code <= extremote.PlayStatusChangeTrackTimeSec; code++ {
-		if !due.Has(code) {
-			continue
-		}
-		n := &extremote.PlayStatusChangeNotification{Status: code}
-		switch code {
-		case extremote.PlayStatusChangeTrackIndex:
-			n.Data = u32(uint32(d.track))
-		case extremote.PlayStatusChangeTrackTimeMs:
-			n.Data = u32(d.pos)
-		case extremote.PlayStatusChangeExtendedStatus:
-			n.Data = []byte{byte(extendedPlayStatus(d.state))}
-		case extremote.PlayStatusChangeTrackTimeSec:
-			d.sentSec = d.pos / 1000
-			n.Data = u32(d.sentSec)
-		}
-		notes = append(notes, n)
-	}
-	return notes
 }
