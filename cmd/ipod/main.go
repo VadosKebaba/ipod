@@ -407,17 +407,32 @@ func logCmd(cmd *ipod.Command, err error, msg string) {
 // notifyInterval is how often PlayStatusChangeNotifications go out (an iPod: about 500 ms).
 var notifyInterval = 500 * time.Millisecond
 
+// Player is what the Extended Remote lingo reports and controls: DevExtRemote, a play state
+// of its own, or something that follows a real player (the phone over Bluetooth AVRCP, say;
+// it can also implement extremote.DeviceTrackInfo for the track names).
+type Player interface {
+	extremote.DeviceExtRemote
+	// Notifications returns the PlayStatusChangeNotifications due now; called every
+	// notifyInterval.
+	Notifications() []*extremote.PlayStatusChangeNotification
+	// Reset: the head unit (re)connects.
+	Reset()
+}
+
+// newPlayer makes the Player for each processFrames run.
+var newPlayer = func() Player { return NewDevExtRemote(time.Now) }
+
 // session is one processFrames run. Replies (processFrames) and notifications (notify) are
 // sent from two goroutines, so anything that uses the serde or writes frames holds mu.
 type session struct {
 	mu    sync.Mutex
 	serde ipod.CommandSerde
 	w     ipod.FrameWriter
-	ext   *DevExtRemote
+	ext   Player
 }
 
 func processFrames(frameTransport ipod.FrameReadWriter) {
-	s := &session{w: frameTransport, ext: NewDevExtRemote(time.Now)}
+	s := &session{w: frameTransport, ext: newPlayer()}
 	var notifier sync.WaitGroup
 	done := make(chan struct{})
 	notifier.Add(1)
@@ -524,7 +539,7 @@ func (s *session) notify(done <-chan struct{}) {
 
 var devGeneral = &DevGeneral{}
 
-func handlePacket(cmdWriter ipod.CommandWriter, cmd *ipod.Command, ext *DevExtRemote) {
+func handlePacket(cmdWriter ipod.CommandWriter, cmd *ipod.Command, ext Player) {
 	switch cmd.ID.LingoID() {
 	case ipod.LingoGeneralID:
 		if auth, ok := cmd.Payload.(*general.RetDevAuthenticationInfo); ok {

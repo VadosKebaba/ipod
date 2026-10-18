@@ -84,3 +84,59 @@ func TestSetPlayStatusChangeNotificationForms(t *testing.T) {
 		t.Errorf("1-byte set = %#x", PlayStatusChangesShort)
 	}
 }
+
+type fakePlayer struct{ names bool }
+
+func (fakePlayer) PlaybackStatus() (uint32, uint32, PlayerState) {
+	return 1000, 0, PlayerStatePlaying
+}
+func (fakePlayer) CurrentTrack() (int32, uint32)                { return 0, 1 }
+func (fakePlayer) PlayControl(PlayControlCmd)                   {}
+func (fakePlayer) SetCurrentTrack(int32, bool)                  {}
+func (fakePlayer) SetPlayStatusNotifications(PlayStatusChanges) {}
+
+type namedPlayer struct{ fakePlayer }
+
+func (namedPlayer) TrackInfo(index int32) (string, string, string) {
+	return "Song", "Band", "Record"
+}
+
+func TestTrackInfo(t *testing.T) {
+	ask := func(dev DeviceExtRemote, payload interface{}) []byte {
+		cmd, err := ipod.BuildCommand(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := ipod.CmdBuffer{}
+		HandleExtRemote(cmd, &out, dev)
+		switch r := out.Commands[0].Payload.(type) {
+		case *ReturnIndexedPlayingTrackTitle:
+			return r.Title
+		case *ReturnIndexedPlayingTrackArtistName:
+			return r.ArtistName
+		case *ReturnIndexedPlayingTrackAlbumName:
+			return r.AlbumName
+		}
+		t.Fatalf("answer %T", out.Commands[0].Payload)
+		return nil
+	}
+	for _, c := range []struct {
+		dev  DeviceExtRemote
+		want [3]string
+	}{
+		{nil, [3]string{"title", "artist", "album"}},
+		{fakePlayer{}, [3]string{"title", "artist", "album"}},
+		{namedPlayer{}, [3]string{"Song", "Band", "Record"}},
+	} {
+		got := [3][]byte{
+			ask(c.dev, &GetIndexedPlayingTrackTitle{}),
+			ask(c.dev, &GetIndexedPlayingTrackArtistName{}),
+			ask(c.dev, &GetIndexedPlayingTrackAlbumName{}),
+		}
+		for i := range got {
+			if !bytes.Equal(got[i], ipod.StringToBytes(c.want[i])) {
+				t.Errorf("%T: %q, want %q", c.dev, got[i], c.want[i])
+			}
+		}
+	}
+}

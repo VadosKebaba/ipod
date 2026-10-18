@@ -18,6 +18,20 @@ type DeviceExtRemote interface {
 	SetPlayStatusNotifications(enabled PlayStatusChanges)
 }
 
+// DeviceTrackInfo is optional for a DeviceExtRemote: the names of the playing list's tracks,
+// e.g. from the phone over Bluetooth AVRCP. Without it the answers are "title", "artist" and
+// "album".
+type DeviceTrackInfo interface {
+	TrackInfo(index int32) (title, artist, album string)
+}
+
+func trackInfo(dev DeviceExtRemote, index int32) (title, artist, album string) {
+	if ti, ok := dev.(DeviceTrackInfo); ok {
+		return ti.TrackInfo(index)
+	}
+	return "title", "artist", "album"
+}
+
 func ackSuccess(req *ipod.Command) *ACK {
 	return &ACK{Status: ACKStatusSuccess, CmdID: req.ID.CmdID()}
 }
@@ -117,16 +131,19 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 			TrackIndex: index,
 		})
 	case *GetIndexedPlayingTrackTitle:
+		title, _, _ := trackInfo(dev, msg.TrackIndex)
 		ipod.Respond(req, tr, &ReturnIndexedPlayingTrackTitle{
-			Title: ipod.StringToBytes("title"),
+			Title: ipod.StringToBytes(title),
 		})
 	case *GetIndexedPlayingTrackArtistName:
+		_, artist, _ := trackInfo(dev, msg.TrackIndex)
 		ipod.Respond(req, tr, &ReturnIndexedPlayingTrackArtistName{
-			ArtistName: ipod.StringToBytes("artist"),
+			ArtistName: ipod.StringToBytes(artist),
 		})
 	case *GetIndexedPlayingTrackAlbumName:
+		_, _, album := trackInfo(dev, msg.TrackIndex)
 		ipod.Respond(req, tr, &ReturnIndexedPlayingTrackAlbumName{
-			AlbumName: ipod.StringToBytes("album"),
+			AlbumName: ipod.StringToBytes(album),
 		})
 	case *SetPlayStatusChangeNotification:
 		if dev != nil {

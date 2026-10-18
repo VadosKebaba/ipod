@@ -33,7 +33,7 @@ type DevExtRemote struct {
 	sentSec uint32                      // last PlayStatusChangeTrackTimeSec value sent
 }
 
-var _ extremote.DeviceExtRemote = &DevExtRemote{}
+var _ Player = &DevExtRemote{}
 
 func NewDevExtRemote(now func() time.Time) *DevExtRemote {
 	d := &DevExtRemote{now: now}
