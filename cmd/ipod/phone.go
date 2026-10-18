@@ -229,8 +229,11 @@ func (p *BluezPlayer) refresh() (phoneState, error) {
 	return st, nil
 }
 
+// key identifies the track. Not the duration: the iPhone sends it apart from the names,
+// often a second later and at first sometimes the previous track's, and each of those would
+// count as a track change (the car's index flipping 2, 3, 2 within a second).
 func (t phoneTrack) key() string {
-	return fmt.Sprintf("%s|%s|%s|%d|%d|%d", t.Title, t.Artist, t.Album, t.Duration, t.Number, t.Count)
+	return fmt.Sprintf("%s|%s|%s|%d|%d", t.Title, t.Artist, t.Album, t.Number, t.Count)
 }
 
 // apply puts st in the cache and marks what changed for the notifications. Under mu.
@@ -244,6 +247,8 @@ func (p *BluezPlayer) apply(st phoneState, at time.Time) {
 		} else {
 			log.Infof("phone: %s (%s), player %s, codec %s", st.Name, st.Address, st.Player, orNone(st.Codec))
 		}
+	} else if st.Player != "" && st.Codec != prev.Codec {
+		log.Infof("phone: codec %s", orNone(st.Codec))
 	}
 	if st.Player != "" {
 		if key := st.Track.key(); key != p.key {

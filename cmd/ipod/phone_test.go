@@ -281,6 +281,8 @@ func TestBluezPlayerIndex(t *testing.T) {
 	check("and the next", 1, 4, "1:1")
 	fake.set(func(st *phoneState) { st.Position = 5000 })
 	check("position only", 1, 4)
+	fake.set(func(st *phoneState) { st.Track.Duration = 1190000 })
+	check("duration only (the iPhone sends it late): same track", 1, 4)
 
 	fake.set(func(st *phoneState) { st.Track.Number, st.Track.Count = 5, 12 })
 	check("phone's numbers", 4, 12, "1:4")
