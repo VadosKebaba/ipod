@@ -32,6 +32,74 @@ func trackInfo(dev DeviceExtRemote, index int32) (title, artist, album string) {
 	return "title", "artist", "album"
 }
 
+// DeviceArtwork is optional for a DeviceExtRemote: album art for the head unit. Without it
+// there are no artwork formats and no track has a picture.
+type DeviceArtwork interface {
+	ArtworkFormats() []ArtworkFormat
+	// TrackArtwork returns the picture of track index in format formatID, or nil.
+	TrackArtwork(index int32, formatID uint16) *ArtworkImage
+}
+
+// ArtworkImage is a picture in one of the ArtworkFormats: Height rows of RowSize bytes.
+type ArtworkImage struct {
+	Format  ArtworkFormat
+	RowSize uint32
+	Pixels  []byte
+}
+
+// ArtworkChunk is the most picture data per RetTrackArtworkData packet: with the header the
+// packet stays in the small (1-byte length) format.
+var ArtworkChunk = 240
+
+func artworkFormats(dev DeviceExtRemote) []ArtworkFormat {
+	if a, ok := dev.(DeviceArtwork); ok {
+		return a.ArtworkFormats()
+	}
+	return nil
+}
+
+func trackArtwork(dev DeviceExtRemote, index int32, formatID uint16) *ArtworkImage {
+	if a, ok := dev.(DeviceArtwork); ok {
+		return a.TrackArtwork(index, formatID)
+	}
+	return nil
+}
+
+// trackArtworkCounts: the formats track index has a picture in, one each.
+func trackArtworkCounts(dev DeviceExtRemote, index int32) []TrackArtworkCount {
+	var counts []TrackArtworkCount
+	for _, f := range artworkFormats(dev) {
+		if trackArtwork(dev, index, f.FormatID) != nil {
+			counts = append(counts, TrackArtworkCount{FormatID: f.FormatID, Count: 1})
+		}
+	}
+	return counts
+}
+
+// sendArtwork sends img as RetTrackArtworkData packets, all with req's transaction.
+func sendArtwork(req *ipod.Command, tr ipod.CommandWriter, img *ArtworkImage) {
+	data := img.Pixels
+	for i := 0; i == 0 || len(data) > 0; i++ {
+		n := ArtworkChunk
+		if i == 0 {
+			// room for the header, and whole pixels in every packet
+			n = (n - (artworkHeaderLen - 2)) &^ 1
+		}
+		if n > len(data) {
+			n = len(data)
+		}
+		pkt := &RetTrackArtworkData{PacketIndex: uint16(i), Data: data[:n]}
+		if i == 0 {
+			pkt.PixelFormat = img.Format.PixelFormat
+			pkt.ImageWidth, pkt.ImageHeight = img.Format.ImageWidth, img.Format.ImageHeight
+			pkt.BottomRightX, pkt.BottomRightY = img.Format.ImageWidth-1, img.Format.ImageHeight-1
+			pkt.RowSize = img.RowSize
+		}
+		ipod.Respond(req, tr, pkt)
+		data = data[n:]
+	}
+}
+
 func ackSuccess(req *ipod.Command) *ACK {
 	return &ACK{Status: ACKStatusSuccess, CmdID: req.ID.CmdID()}
 }
@@ -74,8 +142,12 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 			if dev != nil {
 				trackLength, _, _ = dev.PlaybackStatus()
 			}
+			var caps uint32
+			if len(trackArtworkCounts(dev, msg.TrackIndex)) > 0 {
+				caps |= TrackCapsHasArtwork
+			}
 			info = &TrackCaps{
-				Caps:         0x0,
+				Caps:         caps,
 				TrackLength:  trackLength,
 				ChapterCount: 1,
 			}
@@ -86,7 +158,11 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 				Text:        0x00,
 			}
 		case TrackInfoArtworkCount:
-			info = struct{}{}
+			if counts := trackArtworkCounts(dev, msg.TrackIndex); len(counts) > 0 {
+				info = counts
+			} else {
+				info = struct{}{}
+			}
 		default:
 			info = []byte{0x00}
 
@@ -96,8 +172,12 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 			Info:     info,
 		})
 	case *GetArtworkFormats:
-		ipod.Respond(req, tr, &RetArtworkFormats{})
+		ipod.Respond(req, tr, &RetArtworkFormats{Formats: artworkFormats(dev)})
 	case *GetTrackArtworkData:
+		if img := trackArtwork(dev, msg.TrackIndex, msg.FormatID); img != nil {
+			sendArtwork(req, tr, img)
+			break
+		}
 		ipod.Respond(req, tr, &ACK{
 			Status: ACKStatusFailed,
 			CmdID:  req.ID.CmdID(),
@@ -170,7 +250,12 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 		}
 		ipod.Respond(req, tr, ackSuccess(req))
 	case *GetTrackArtworkTimes:
-		ipod.Respond(req, tr, &RetTrackArtworkTimes{})
+		times := &RetTrackArtworkTimes{}
+		// one picture, at the start of the track
+		if msg.ArtworkIndex == 0 && msg.ArtworkCount != 0 && trackArtwork(dev, msg.TrackIndex, msg.FormatID) != nil {
+			times.Times = []uint32{0}
+		}
+		ipod.Respond(req, tr, times)
 	case *GetShuffle:
 		ipod.Respond(req, tr, &ReturnShuffle{Mode: ShuffleOff})
 	case *SetShuffle:

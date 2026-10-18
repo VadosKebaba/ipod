@@ -165,6 +165,17 @@ func main() {
 			Name:  "demo-track",
 			Usage: "the stub's track names, \"Title|Artist|Album\" (default: title, artist, album)",
 		},
+		cli.StringFlag{
+			Name:  "artwork",
+			Value: artworkOff,
+			Usage: "album art for the head unit, the same picture for every track: off, test (a colour test " +
+				"pattern) or a PNG/JPEG `file`",
+		},
+		cli.StringFlag{
+			Name:  "artwork-pixel",
+			Value: artworkPixelLE,
+			Usage: "the artwork's pixel format: 565le or 565be (RGB 565, byte order)",
+		},
 		cli.BoolTFlag{
 			Name: "toggle-guard",
 			Usage: "a play/pause toggle from the head unit while it takes no audio may pause the phone but never " +
@@ -211,6 +222,10 @@ func main() {
 			c.GlobalString("demo-track"), c.GlobalBoolT("toggle-guard"))
 		if err != nil {
 			return err
+		}
+		// a bad --artwork costs the picture, not the iPod: the client runs on without it
+		if opts.art, err = loadArtwork(c.GlobalString("artwork"), c.GlobalString("artwork-pixel")); err != nil {
+			log.Errorf("%v: no artwork", err)
 		}
 		playerOpts = opts
 
@@ -521,8 +536,20 @@ func (s *session) handleFrame(inFrame []byte) {
 		handlePacket(&outCmdBuf, inCmdBuf.Commands[i], s.ext)
 	}
 
+	start := time.Now()
+	var artPackets, artBytes int
 	for i := range outCmdBuf.Commands {
-		s.send(outCmdBuf.Commands[i], true)
+		cmd := outCmdBuf.Commands[i]
+		// a picture is a hundred packets or more: only the first is logged
+		art, isArt := cmd.Payload.(*extremote.RetTrackArtworkData)
+		if isArt {
+			artPackets++
+			artBytes += len(art.Data)
+		}
+		s.send(cmd, !isArt || art.PacketIndex == 0)
+	}
+	if artPackets > 0 {
+		log.Infof("artwork: sent %d bytes in %d packets in %v", artBytes, artPackets, time.Since(start).Round(time.Millisecond))
 	}
 }
 

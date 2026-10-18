@@ -64,6 +64,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 # the stub's track names, to see the head unit's font without a phone
 ./ipod -d --player=stub --demo-track "Группа крови|Кино|Группа крови" serve /dev/iap0
 
+# album art for the head unit, the same picture for every track (default off): a colour
+# test pattern (red, green / blue, white quadrants) or a PNG/JPEG, offered as 128x128 and
+# 240x240 RGB 565; --artwork-pixel=565be if the colours come out wrong
+./ipod -d --artwork=test serve /dev/iap0
+./ipod -d --artwork=/var/lib/ipod/cover.jpg serve /dev/iap0
+
 # the phone as the head unit sees it, and the head unit's buttons (sent as its PlayControl,
 # through the same code); global flags as for serve
 ./ipod bt now

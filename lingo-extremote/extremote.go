@@ -135,6 +135,18 @@ const (
 	TrackInfoArtworkCount TrackInfoType = 0x07
 )
 
+// TrackCaps.Caps bits
+const (
+	TrackCapsHasArtwork uint32 = 1 << 2
+)
+
+// TrackArtworkCount is one entry of TrackInfoArtworkCount's info: how many pictures a track
+// has in an artwork format.
+type TrackArtworkCount struct {
+	FormatID uint16
+	Count    uint16
+}
+
 type TrackCaps struct {
 	Caps         uint32
 	TrackLength  uint32
@@ -183,6 +195,10 @@ func (s *ReturnIndexedPlayingTrackInfo) UnmarshalBinary(data []byte) error {
 		s.Info = &TrackCaps{}
 	case TrackInfoDescription, TrackInfoLyrics:
 		s.Info = &TrackLongText{}
+	case TrackInfoArtworkCount:
+		counts := make([]TrackArtworkCount, r.Len()/4)
+		s.Info = counts
+		return binary.Read(r, binary.BigEndian, counts)
 	default:
 		s.Info = &struct{}{}
 	}
@@ -247,6 +263,54 @@ type RetTrackArtworkData struct {
 	BottomRightY uint16
 	RowSize      uint32
 	Data         []byte
+}
+
+// Pixel formats of ArtworkFormat and RetTrackArtworkData
+const (
+	ArtworkMono2bpp  byte = 0x01
+	ArtworkRGB565LE  byte = 0x02
+	ArtworkRGB565BE  byte = 0x03
+	artworkHeaderLen      = 2 + 1 + 2 + 2 + 4*2 + 4
+)
+
+// RetTrackArtworkData is one packet of a picture: packet 0 carries the format, size, inset
+// and row size before its data, the following ones (the same transaction) only their index.
+func (s RetTrackArtworkData) MarshalBinary() ([]byte, error) {
+	w := bytes.Buffer{}
+	if s.PacketIndex == 0 {
+		hdr := []interface{}{s.PacketIndex, s.PixelFormat, s.ImageWidth, s.ImageHeight,
+			s.TopLeftX, s.TopLeftY, s.BottomRightX, s.BottomRightY, s.RowSize}
+		for _, v := range hdr {
+			binary.Write(&w, binary.BigEndian, v)
+		}
+	} else {
+		binary.Write(&w, binary.BigEndian, s.PacketIndex)
+	}
+	w.Write(s.Data)
+	return w.Bytes(), nil
+}
+
+func (s *RetTrackArtworkData) UnmarshalBinary(data []byte) error {
+	if len(data) < 2 {
+		return io.ErrUnexpectedEOF
+	}
+	s.PacketIndex = binary.BigEndian.Uint16(data)
+	if s.PacketIndex != 0 {
+		s.Data = append([]byte(nil), data[2:]...)
+		return nil
+	}
+	if len(data) < artworkHeaderLen {
+		return io.ErrUnexpectedEOF
+	}
+	r := bytes.NewReader(data[2:artworkHeaderLen])
+	for _, v := range []interface{}{&s.PixelFormat, &s.ImageWidth, &s.ImageHeight,
+		&s.TopLeftX, &s.TopLeftY, &s.BottomRightX, &s.BottomRightY, &s.RowSize} {
+		if err := binary.Read(r, binary.BigEndian, v); err != nil {
+			return err
+		}
+	}
+	s.Data = append([]byte(nil), data[artworkHeaderLen:]...)
+	return nil
 }
 
 //ack
@@ -480,8 +544,21 @@ type GetTrackArtworkTimes struct {
 	ArtworkIndex uint16
 	ArtworkCount int16
 }
+
+// RetTrackArtworkTimes: when each of the track's pictures starts, ms into the track.
 type RetTrackArtworkTimes struct {
-	// empty for now
+	Times []uint32
+}
+
+func (s RetTrackArtworkTimes) MarshalBinary() ([]byte, error) {
+	w := bytes.Buffer{}
+	binary.Write(&w, binary.BigEndian, s.Times)
+	return w.Bytes(), nil
+}
+
+func (s *RetTrackArtworkTimes) UnmarshalBinary(data []byte) error {
+	s.Times = make([]uint32, len(data)/4)
+	return binary.Read(bytes.NewReader(data), binary.BigEndian, s.Times)
 }
 
 type ShuffleMode byte

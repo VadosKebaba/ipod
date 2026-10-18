@@ -106,6 +106,32 @@ the phone started, as a real iPod would; Vadym keeps that. The car enables the 1
 PlayStatusChangeNotifications (track index, position) and sends GetArtworkFormats on every
 connect (Level 4 is worth a try). Steering-wheel "enter" is not a play/pause button.
 
+## Level 4, step 1: album art, one picture for every track (2026-10-18, not yet in the car)
+
+`--artwork=off|test|FILE` (default off), `--artwork-pixel=565le|565be` (default le).
+- `lingo-extremote`: `DeviceArtwork` (optional, like `DeviceTrackInfo`): `ArtworkFormats`,
+  `TrackArtwork(index, format)` → `ArtworkImage`. GetArtworkFormats lists them; TrackCaps
+  gets bit 2 (has artwork); TrackInfoArtworkCount lists {format, 1}; GetTrackArtworkTimes
+  answers one picture at 0 ms; GetTrackArtworkData sends RetTrackArtworkData packets with
+  the request's transaction: packet 0 with format, size, inset (0,0)-(w-1,h-1) and row size,
+  then index + data; at most 240 data bytes each, whole pixels, so every packet stays in
+  the small format (≤ 255). Without a picture: ACK failed, as before. Marshal/Unmarshal for
+  RetTrackArtworkData, RetTrackArtworkTimes and the artwork-count info.
+- `cmd/ipod/artwork.go`: formats 1 = 128×128 and 2 = 240×240 RGB 565; test pattern (black
+  frame, red top left, green top right, blue bottom left, white bottom right) or a PNG/JPEG
+  cropped to its centre square and area-averaged. `AutoPlayer` serves it for every track,
+  phone or stub. Only packet 0 of a picture is logged, then `artwork: sent N bytes in M
+  packets in T`.
+- Tests: wire formats, the handler (packets, transaction, sizes, no picture), the pattern's
+  pixels in both byte orders, a PNG crop/scale, end to end through processFrames (240×240,
+  481 packets, all small).
+- Speed: the gadget's HID IN endpoint is polled every 1 ms at full speed, 63 bytes a report:
+  about 0.6 s for 128×128, 2 s for 240×240, during which the client answers nothing else.
+
+Step 2, the phone's own covers: BlueZ shows none (`Track` has no `ImgHandle`). AVRCP cover
+art needs bluetoothd to reach obexd (BIP); check whether obexd runs at all on the Pi before
+anything else. Fallback: look covers up online by artist + title.
+
 ## Known risks / open questions
 
 - **The guard may block resume from the car.** The car stops taking audio while it's told

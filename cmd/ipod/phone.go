@@ -598,7 +598,8 @@ type AutoPlayer struct {
 	stub  *DevExtRemote
 	phone *BluezPlayer // nil: the stub only (--player=stub, or no D-Bus)
 	text  textOut
-	demo  *[3]string // --demo-track: the stub's title, artist and album
+	demo  *[3]string  // --demo-track: the stub's title, artist and album
+	art   *artworkSet // --artwork: the picture for every track; nil: none
 
 	mu      sync.Mutex
 	onPhone bool
@@ -606,6 +607,7 @@ type AutoPlayer struct {
 
 var _ Player = &AutoPlayer{}
 var _ extremote.DeviceTrackInfo = &AutoPlayer{}
+var _ extremote.DeviceArtwork = &AutoPlayer{}
 
 func newAutoPlayer(stub *DevExtRemote, phone *BluezPlayer, text textOut, demo *[3]string) *AutoPlayer {
 	return &AutoPlayer{stub: stub, phone: phone, text: text, demo: demo}
@@ -705,6 +707,22 @@ func (a *AutoPlayer) TrackInfo(index int32) (title, artist, album string) {
 	return "title", "artist", "album"
 }
 
+// ArtworkFormats: --artwork's formats, none without it.
+func (a *AutoPlayer) ArtworkFormats() []extremote.ArtworkFormat {
+	if a.art == nil {
+		return nil
+	}
+	return a.art.formats
+}
+
+// TrackArtwork: --artwork's picture, the same for every track, phone or stub.
+func (a *AutoPlayer) TrackArtwork(index int32, formatID uint16) *extremote.ArtworkImage {
+	if a.art == nil {
+		return nil
+	}
+	return a.art.images[formatID]
+}
+
 func (a *AutoPlayer) Close() error {
 	if a.phone != nil {
 		return a.phone.Close()
@@ -736,6 +754,7 @@ type playerOptions struct {
 	text        textOut
 	demo        *[3]string
 	toggleGuard bool
+	art         *artworkSet
 }
 
 // playerOpts: set in app.Before
@@ -775,16 +794,18 @@ func (o playerOptions) String() string {
 	if o.demo != nil {
 		s += fmt.Sprintf(", demo track %q", *o.demo)
 	}
-	return s
+	return s + ", artwork " + o.art.String()
 }
 
 // newPlayer: an AutoPlayer, with the phone side running for --player=auto.
 func (o playerOptions) newPlayer() *AutoPlayer {
 	stub := NewDevExtRemote(time.Now)
-	if o.mode != playerAuto {
-		return newAutoPlayer(stub, nil, o.text, o.demo)
+	var phone *BluezPlayer
+	if o.mode == playerAuto {
+		phone = newBluezPlayer(newDBusPhones(), time.Now, o.text, o.toggleGuard)
+		phone.start()
 	}
-	phone := newBluezPlayer(newDBusPhones(), time.Now, o.text, o.toggleGuard)
-	phone.start()
-	return newAutoPlayer(stub, phone, o.text, o.demo)
+	a := newAutoPlayer(stub, phone, o.text, o.demo)
+	a.art = o.art
+	return a
 }
