@@ -137,7 +137,11 @@ default and bigout layouts, 631 packets for 128×128; 240 with legacy), set in `
 `--artwork-chunk` overrides; `TestArtworkOneReportPerPacket` encodes through the real HID
 encoder and checks every packet is one report.
 
-Log of that run (old build, 240-byte packets): on every track change the car asks caps
+**Second car test (2026-10-18, photo): clean.** With one HID report per packet the X9U6
+draws the test pattern exactly (quadrants, frame, colours, orientation). The car side of
+album art is done; what is left is a source of real covers.
+
+Log of the first run (old build, 240-byte packets): on every track change the car asks caps
 (info 0), artwork count (info 7), GetTrackArtworkTimes, then ~300 ms later
 GetTrackArtworkData for format 1 (128×128, 32768 bytes); no retries or errors. Sending took
 1.22 s for 137 packets = 685 HID reports, i.e. ~1.8 ms a report (not the 1 ms the endpoint
