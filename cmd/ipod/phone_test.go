@@ -87,6 +87,7 @@ func testPhone(t *testing.T, fake *fakePhone, clk *fakeClock, streaming *string)
 	p.streaming = func() string { return *streaming }
 	p.refreshEvery = time.Hour
 	p.rereads = nil
+	p.holdFor = 0
 	return p
 }
 
@@ -281,8 +282,15 @@ func TestBluezPlayerIndex(t *testing.T) {
 	check("and the next", 1, 4, "1:1")
 	fake.set(func(st *phoneState) { st.Position = 5000 })
 	check("position only", 1, 4)
+	// the rest of the same track arriving late: the same index, reported again so the car
+	// reads the names once more
 	fake.set(func(st *phoneState) { st.Track.Duration = 1190000 })
-	check("duration only (the iPhone sends it late): same track", 1, 4)
+	check("duration only (the iPhone sends it late): same track", 1, 4, "1:1")
+	fake.set(func(st *phoneState) { st.Track.Album = "" })
+	check("album gone", 1, 4, "1:1")
+	fake.set(func(st *phoneState) { st.Track.Album = "Звезда по имени Солнце" })
+	check("album arrives late: same track", 1, 4, "1:1")
+	check("then quiet", 1, 4)
 
 	fake.set(func(st *phoneState) { st.Track.Number, st.Track.Count = 5, 12 })
 	check("phone's numbers", 4, 12, "1:4")
@@ -352,6 +360,57 @@ func TestBluezPlayerPosition(t *testing.T) {
 	if got := notes(p.Notifications()); !eq(got, []string{"4:3000", "6:0a", "7:3"}) {
 		t.Fatalf("playing again: %q", got)
 	}
+}
+
+// After a Play or Pause the car is told the new status until the phone reports it, or for
+// holdFor; a second press in that time is decided from it.
+func TestBluezPlayerHold(t *testing.T) {
+	clk := newFakeClock()
+	fake := &fakePhone{st: iPhone("playing", trackA)}
+	streaming := "Y"
+	p := testPhone(t, fake, clk, &streaming)
+	p.holdFor = 2500 * time.Millisecond
+	p.start()
+	defer p.Close()
+	state := func(step string, want extremote.PlayerState) {
+		t.Helper()
+		if _, _, got := p.PlaybackStatus(); got != want {
+			t.Fatalf("%s: %v, want %v", step, got, want)
+		}
+	}
+
+	p.PlayControl(extremote.PlayControlToggle)
+	p.busy.Wait()
+	if calls := fake.takeCalls(); !reflect.DeepEqual(calls, []string{"Pause"}) {
+		t.Fatalf("calls %v", calls)
+	}
+	clk.add(300 * time.Millisecond)
+	p.refresh() // the iPhone still says playing
+	state("300 ms, the phone still says playing", extremote.PlayerStatePaused)
+
+	// pressed again: play, decided from the held paused, not the stale playing
+	p.PlayControl(extremote.PlayControlToggle)
+	p.busy.Wait()
+	if calls := fake.takeCalls(); !reflect.DeepEqual(calls, []string{"Play"}) {
+		t.Fatalf("second press: calls %v, want [Play]", calls)
+	}
+	state("after the second press", extremote.PlayerStatePlaying)
+
+	// the phone agrees: the hold ends, and a later change from the phone shows at once
+	p.refresh()
+	fake.set(func(st *phoneState) { st.Status = "paused" })
+	p.refresh()
+	state("paused from the phone", extremote.PlayerStatePaused)
+
+	// a Play the phone never does: held 2.5 s, then the phone's paused wins
+	p.PlayControl(extremote.PlayControlPlay)
+	p.busy.Wait()
+	clk.add(2 * time.Second)
+	p.refresh()
+	state("2 s after a Play the phone ignored", extremote.PlayerStatePlaying)
+	clk.add(time.Second)
+	p.refresh()
+	state("3 s after", extremote.PlayerStatePaused)
 }
 
 // BlueZ failing: the cache holds for phoneStaleAfter, then there is no phone.

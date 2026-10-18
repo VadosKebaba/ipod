@@ -101,6 +101,10 @@ type BluezPlayer struct {
 	window  int32     // the current index without track numbers: 1 or 2
 	state   extremote.PlayerState
 	n       notifier
+	// after a Play or Pause: the status it should give, until holdUntil (see holdStatus)
+	hold      string
+	holdUntil time.Time
+	holdFor   time.Duration
 
 	cmds    chan phoneCmd
 	pokes   chan struct{}
@@ -122,6 +126,7 @@ func newBluezPlayer(src phoneSource, now func() time.Time, text textOut, toggleG
 		streaming:    carStreaming,
 		toggleGuard:  toggleGuard,
 		refreshEvery: 2 * time.Second,
+		holdFor:      2500 * time.Millisecond,
 		rereads:      []time.Duration{300 * time.Millisecond, 1500 * time.Millisecond},
 		window:       2, // the first track makes it 1
 		state:        extremote.PlayerStatePaused,
@@ -181,7 +186,9 @@ func (p *BluezPlayer) run() {
 			if err != nil {
 				log.Warnf("phone: after %s +%v: BlueZ: %v", r.label, r.after, err)
 			} else {
-				log.Infof("phone: after %s +%v: phone %s, car streaming %s", r.label, r.after, describeStatus(st), p.streaming())
+				told, _ := p.snapshot()
+				log.Infof("phone: after %s +%v: phone %s, car told %s, car streaming %s",
+					r.label, r.after, describeStatus(st), describeStatus(told), p.streaming())
 			}
 		case <-p.pokes:
 			p.refresh()
@@ -229,11 +236,12 @@ func (p *BluezPlayer) refresh() (phoneState, error) {
 	return st, nil
 }
 
-// key identifies the track. Not the duration: the iPhone sends it apart from the names,
-// often a second later and at first sometimes the previous track's, and each of those would
-// count as a track change (the car's index flipping 2, 3, 2 within a second).
+// key identifies the track: title, artist and the phone's numbers. Not the album or the
+// duration: the iPhone sends those after the title and artist, up to a second later (the
+// duration at first sometimes the previous track's), and each would count as a track change,
+// the car's index flipping 2, 3, 2 within a second.
 func (t phoneTrack) key() string {
-	return fmt.Sprintf("%s|%s|%s|%d|%d", t.Title, t.Artist, t.Album, t.Number, t.Count)
+	return fmt.Sprintf("%s|%s|%d|%d", t.Title, t.Artist, t.Number, t.Count)
 }
 
 // apply puts st in the cache and marks what changed for the notifications. Under mu.
@@ -259,11 +267,39 @@ func (p *BluezPlayer) apply(st phoneState, at time.Time) {
 			index, num := p.index()
 			log.Infof("phone: track %q / %q / %q, %s, the car sees %d of %d",
 				st.Track.Title, st.Track.Artist, st.Track.Album, describeTrackNumber(st.Track), index+1, num)
+		} else if st.Player == prev.Player && (st.Track.Album != prev.Track.Album || st.Track.Duration != prev.Track.Duration) {
+			// the rest of the same track arrived: the same index again, so the car reads the
+			// names and the length once more
+			p.n.mark(extremote.PlayStatusChangeTrackIndex, extremote.PlayStatusChangeTrackTimeMs,
+				extremote.PlayStatusChangeTrackTimeSec)
+			log.Infof("phone: track %q / %q / %q, %s (details of the same track)",
+				st.Track.Title, st.Track.Artist, st.Track.Album, describeTrackNumber(st.Track))
 		}
 	}
+	p.holdStatus(&st, at)
+	p.st = st
 	if state := playerState(st.Status); state != p.state {
 		p.state = state
 		p.n.markState(state)
+	}
+}
+
+// holdStatus keeps the status a Play or Pause should give for holdFor, against reads that
+// still say the opposite: the iPhone reports the change up to about a second late, and the car
+// would see playing, paused, playing. A read that agrees ends the hold; one that still
+// disagrees when it ends wins (and is logged: the phone didn't do it). Under mu.
+func (p *BluezPlayer) holdStatus(st *phoneState, at time.Time) {
+	if p.hold == "" {
+		return
+	}
+	switch {
+	case st.Player == "" || playerState(st.Status) == playerState(p.hold):
+		p.hold = ""
+	case at.Before(p.holdUntil):
+		st.Status = p.hold
+	default:
+		log.Infof("phone: still %s %v after the car's command for %s", orNone(st.Status), p.holdFor, p.hold)
+		p.hold = ""
 	}
 }
 
@@ -440,14 +476,16 @@ func phoneAction(cmd extremote.PlayControlCmd, status, streaming string, toggleG
 }
 
 // execute runs a command: the phone is read again first, so the decision never rests on a
-// stale cache (a toggle never toggles blind). Logged with the car's streaming state and the
+// stale cache (a toggle never toggles blind), only on a Play or Pause still held. Logged with the car's streaming state and the
 // phone's status before and after, then again at each re-read.
 func (p *BluezPlayer) execute(c phoneCmd) {
 	streaming := p.streaming()
-	before, err := p.refresh()
-	if err != nil {
+	if _, err := p.refresh(); err != nil {
 		log.Warnf("phone: %s: BlueZ: %v; deciding from the cache", c.label, err)
 	}
+	// fresh, unless a Play or Pause the phone hasn't reported yet is held (a second press
+	// right after the first must not repeat it)
+	before, _ := p.snapshot()
 	method, why := phoneAction(c.cmd, before.Status, streaming, p.toggleGuard)
 	switch {
 	case method == "":
@@ -492,7 +530,10 @@ func (p *BluezPlayer) expect(method string) phoneState {
 	st := p.st
 	_, st.Position, _ = p.position()
 	st.Status = status
-	p.apply(st, p.now())
+	now := p.now()
+	p.hold = ""
+	p.apply(st, now)
+	p.hold, p.holdUntil = status, now.Add(p.holdFor)
 	return p.st
 }
 

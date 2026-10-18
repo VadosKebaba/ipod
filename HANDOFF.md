@@ -41,8 +41,8 @@ No-code rollback with the new client: `--player=stub` in `IPOD_GLOBAL_ARGS`
     `action none (toggle while the car takes no audio never starts the phone)`.
   - Track index: the phone's `TrackNumber - 1` of `NumberOfTracks` when Count ≥ 2 and
     1 ≤ Number ≤ Count, else a list of 4 with the current track at index 1 or 2,
-    alternating on every track change (key: title, artist, album, number, count; not
-    the duration). `TrackInfo(any index)` = the current track through `textOut`; no title → the
+    alternating on every track change (key: title, artist and the phone's numbers; an
+    album or duration arriving later re-reports the same index). `TrackInfo(any index)` = the current track through `textOut`; no title → the
     phone's name.
   - `AutoPlayer`: the stub (`DevExtRemote`) and the phone (nil for `--player=stub`). The phone
     answers while it has a player. On a switch: logged (`player: ...`), `markAll` on the new
@@ -96,7 +96,17 @@ No-code rollback with the new client: `--player=stub` in `IPOD_GLOBAL_ARGS`
 - q60-pi-dash `docs/Q60_Pi_Dash_build_guide.md` roadmap (Level 3 status): that repo wasn't
   reachable from the session; update it by hand.
 
-## Known risks / open questions (decide from the first car logs)
+## First car run (2026-10-18)
+
+Next/previous (3/4), the screen's play/pause (toggle 1), names and timer all work. Every
+toggle came with `car streaming Y`, so the guard never acted (running with
+`--toggle-guard=false` now; it makes no difference in this car). Leaving for FM with the
+phone paused: the car sent nothing. Returning to the iPod source: the car sent a toggle and
+the phone started, as a real iPod would; Vadym keeps that. The car enables the 1-byte
+PlayStatusChangeNotifications (track index, position) and sends GetArtworkFormats on every
+connect (Level 4 is worth a try). Steering-wheel "enter" is not a play/pause button.
+
+## Known risks / open questions
 
 - **The guard may block resume from the car.** The car stops taking audio while it's told
   *paused*, so the toggle from its play button (or on returning to the source) may arrive
@@ -104,9 +114,14 @@ No-code rollback with the new client: `--player=stub` in `IPOD_GLOBAL_ARGS`
   logs show (e.g. allow a toggle within a few seconds of the car selecting the source).
 - Whether the X9U6 enables PlayStatusChangeNotifications, and whether it keeps titles by
   index (decides whether the window alternation is needed).
-- Seen on the Pi (2026-10-18, YouTube on the iPhone): the duration arrives apart from the
-  names, up to a second later and at first sometimes the previous video's. Duration is no
-  longer part of the track key, so that no longer flips the window.
+- Seen on the Pi (2026-10-18): the iPhone sends title and artist first, album and duration
+  up to a second later (the duration at first sometimes the previous track's). The track
+  key is title + artist (+ numbers), so those no longer flip the window; the late details
+  re-report the same index so the car reads them.
+- The iPhone reports a Play/Pause up to ~1 s late (the +300 ms re-read still showed the old
+  status). After a successful Play/Pause the car is told the new status for 2.5 s against
+  reads that disagree (a second press in that time is decided from it); a read that agrees
+  ends the hold early. Re-read lines show both (`phone paused, car told playing`).
 - `codec none` when the player first appeared: the A2DP transport probably came later; codec
   changes are logged now (`phone: codec SBC`).
 - Debian trixie's PipeWire has no AAC Bluetooth codec: the iPhone uses SBC (fine at Level 2).
