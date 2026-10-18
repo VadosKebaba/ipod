@@ -92,6 +92,16 @@ func (d *DevExtRemote) setTrack(index int32) {
 	d.n.mark(extremote.PlayStatusChangeTrackIndex)
 }
 
+// takeOver: the stub answers the head unit again (no phone): playing, so the head unit takes
+// the Pi's audio, and everything reported as changed.
+func (d *DevExtRemote) takeOver() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.advance()
+	d.setState(extremote.PlayerStatePlaying)
+	d.n.markAll(d.state)
+}
+
 func (d *DevExtRemote) PlaybackStatus() (trackLength, trackPos uint32, state extremote.PlayerState) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

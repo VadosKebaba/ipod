@@ -145,6 +145,31 @@ func main() {
 			Usage: "accept RetDevAuthenticationInfo/Signature packets that are short or fail their checksum " +
 				"(the certificate and signature are never verified anyway)",
 		},
+		cli.StringFlag{
+			Name:  "player",
+			Value: playerAuto,
+			Usage: "what serve tells the head unit: auto (the phone over Bluetooth while one plays, else the stub) " +
+				"or stub (Level 2: a player of its own, always playing, nothing from the phone)",
+		},
+		cli.StringFlag{
+			Name:  "text",
+			Value: textAsIs,
+			Usage: "track names to the head unit: asis or translit (Cyrillic in Latin letters)",
+		},
+		cli.IntFlag{
+			Name:  "text-max",
+			Value: 200,
+			Usage: "track names to the head unit: at most this many bytes of UTF-8 (0: no limit)",
+		},
+		cli.StringFlag{
+			Name:  "demo-track",
+			Usage: "the stub's track names, \"Title|Artist|Album\" (default: title, artist, album)",
+		},
+		cli.BoolTFlag{
+			Name: "toggle-guard",
+			Usage: "a play/pause toggle from the head unit while it takes no audio may pause the phone but never " +
+				"starts it (it toggles when leaving the iPod source); --toggle-guard=false: toggles always follow the phone",
+		},
 	}
 
 	app.ExitErrHandler = func(c *cli.Context, err error) {
@@ -181,6 +206,13 @@ func main() {
 		if lenientAuth {
 			log.Warn("lenient auth: damaged authentication packets from the accessory are accepted")
 		}
+
+		opts, err := parsePlayerOptions(c.GlobalString("player"), c.GlobalString("text"), c.GlobalInt("text-max"),
+			c.GlobalString("demo-track"), c.GlobalBoolT("toggle-guard"))
+		if err != nil {
+			return err
+		}
+		playerOpts = opts
 
 		return nil
 	}
@@ -233,10 +265,13 @@ func main() {
 
 				reportR, reportW := hid.NewReportReader(rw), hid.NewReportWriter(rw)
 				frameTransport := hid.NewTransport(reportR, reportW, hidReportDefs)
+				log.Infof("player: %s", playerOpts)
+				newPlayer = func() Player { return playerOpts.newPlayer() }
 				processFrames(frameTransport)
 				return nil
 			},
 		},
+		btCommand(),
 		{
 			Name:    "replay",
 			Aliases: []string{"r"},
@@ -354,8 +389,6 @@ func main() {
 				}
 
 				select {}
-
-				return nil
 			},
 		},
 	}
@@ -419,7 +452,8 @@ type Player interface {
 	Reset()
 }
 
-// newPlayer makes the Player for each processFrames run.
+// newPlayer makes the Player for each processFrames run. serve sets it from the flags
+// (playerOptions); the default, the stub, never touches D-Bus (tests).
 var newPlayer = func() Player { return NewDevExtRemote(time.Now) }
 
 // session is one processFrames run. Replies (processFrames) and notifications (notify) are
@@ -433,6 +467,9 @@ type session struct {
 
 func processFrames(frameTransport ipod.FrameReadWriter) {
 	s := &session{w: frameTransport, ext: newPlayer()}
+	if c, ok := s.ext.(io.Closer); ok {
+		defer c.Close()
+	}
 	var notifier sync.WaitGroup
 	done := make(chan struct{})
 	notifier.Add(1)

@@ -15,7 +15,7 @@ const (
 const (
 	rawSmallPacketMinLen = 1 + 1 + 2 // start + len + ids
 	rawLargePacketMinLen = 1 + 3 + 2 // start + len + ids
-	largePacketMinLen    = 256
+	smallPacketMaxLen    = 255       // the most a small packet's 1-byte length holds; 0x00 marks a large packet
 	minPacketBufSize     = 1024
 )
 
@@ -139,7 +139,7 @@ func (pw *PacketWriter) WritePacket(payload []byte) error {
 	pw.frame = append(pw.frame, PacketStartByte)
 	pktStart := len(pw.frame)
 
-	if len(payload) > largePacketMinLen {
+	if len(payload) > smallPacketMaxLen {
 		var pktLen [3]byte
 		binary.BigEndian.PutUint16(pktLen[1:], uint16(len(payload)))
 		pw.frame = append(pw.frame, pktLen[:]...)

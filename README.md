@@ -48,7 +48,32 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/ipod
 # checksum (some head units damage them; they are never verified). Other packets stay strict.
 ./ipod -d --lenient-auth serve /dev/iap0
 
+# the phone over Bluetooth (BlueZ AVRCP, org.bluez.MediaPlayer1) on the head unit's screen
+# and buttons: the default, --player=auto. With no phone connected (or no D-Bus) the stub
+# player answers, always playing; --player=stub uses only the stub
+./ipod -d --lenient-auth --player=stub serve /dev/iap0
+
+# track names to the head unit: as they are, or Cyrillic in Latin letters, at most
+# --text-max bytes of UTF-8 (default 200, cut on a character boundary)
+./ipod -d --text=translit --text-max=120 serve /dev/iap0
+
+# a play/pause toggle while the head unit takes no audio (g_ipod_audio streaming=N) may pause
+# the phone but never starts it (default); =false: every toggle follows the phone
+./ipod -d --toggle-guard=false serve /dev/iap0
+
+# the stub's track names, to see the head unit's font without a phone
+./ipod -d --player=stub --demo-track "Группа крови|Кино|Группа крови" serve /dev/iap0
+
+# the phone as the head unit sees it, and the head unit's buttons (sent as its PlayControl,
+# through the same code); global flags as for serve
+./ipod bt now
+./ipod bt next      # also prev, play, pause, toggle
+./ipod bt watch     # a line on every change, ctrl-c to stop
 ```
+
+The Bluetooth side needs the system D-Bus and BlueZ (`github.com/godbus/dbus/v5`, pure Go: the
+first build downloads it). `cmd/ipod/scripts/bt-dbusmock-test.py` runs `ipod bt` against a
+mocked BlueZ.
 
 Client app godoc https://godoc.org/github.com/oandrew/ipod/cmd/ipod
 

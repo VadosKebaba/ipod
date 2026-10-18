@@ -1,172 +1,111 @@
-# Level 3 handoff (AVRCP bridge): work in progress
+# Level 3 handoff (AVRCP bridge): implemented, not yet on the Pi
 
-Branch `level3-wip` (VadosKebaba/ipod), paused 2026-10-18 at the usage limit. `pi5-support`
-is untouched at 7b8762c, which is what runs in the car.
+Branch `level3-wip` in both repos (VadosKebaba/ipod and VadosKebaba/ipod-gadget). `pi5-support`
+is untouched (ipod 7b8762c, ipod-gadget 3f55138), which is what runs in the car. Implemented
+2026-10-18 in a cloud session with no Pi, car or iPhone: everything below is tested against
+fakes and a mocked BlueZ only.
 
 ## Safe state / rollback
 
-Both repos carry the tag **`q60-level2-good`** (pushed): ipod 7b8762c, ipod-gadget 3f55138,
-i.e. Level 2 as verified in the car on 2026-10-18. On the Pi:
+Both repos carry the tag **`q60-level2-good`** (Level 2 as verified in the car on 2026-10-18).
+On the Pi:
 
 ```bash
 cd ~/ipod && git fetch --tags && git checkout q60-level2-good && cd ~/ipod-gadget && git fetch --tags && git checkout q60-level2-good && sudo bash install-rpi.sh ~/ipod && sudo bash extras/pi-audio/install.sh && sudo reboot
 ```
 
-Nothing from this branch has been installed on the Pi, so no rollback is needed yet.
+No-code rollback with the new client: `--player=stub` in `IPOD_GLOBAL_ARGS`
+(`/etc/default/ipod-client`) gives the Level 2 answers.
 
-## Done (on this branch)
+## What's on the branch
 
-- `cmd/ipod/extremote.go`: the PlayStatusChangeNotification bookkeeping moved out of
-  `DevExtRemote` into a reusable `notifier` (`reset`, `enable`, `mark`, `markState`,
-  `markAll`, `due`), so a phone-backed player can share it. Behaviour unchanged: the
-  existing DevExtRemote and end-to-end notification tests pass.
-- `cmd/ipod/text.go`: `textOut{mode, max}` for track names sent to the car: `--text=asis`
-  (default) or `translit` (Russian/Ukrainian/Belarusian Cyrillic -> Latin, "Zh"/"ZH" by
-  case), and `truncateUTF8` (byte cap without splitting a character). **No tests yet, and
-  not wired to any flag yet.**
-- `go.mod` / `go.sum`: `github.com/godbus/dbus/v5 v5.1.0` added (marked indirect until it
-  is imported). Note: the Pi build then needs internet once to download it.
+- `cmd/ipod/phone.go`
+  - `BluezPlayer`: a `Player` + `extremote.DeviceTrackInfo` + `io.Closer` over a
+    `phoneSource` (`Read`, `Call`; optional `Watch`). The car's requests are answered from a
+    cache only; one worker goroutine refreshes it on BlueZ signals (`Poke`), every 2 s, and
+    300 ms / 1.5 s after each command, and runs the commands from a queue (the iAP ACK goes
+    out at once). A read error keeps the cache for 10 s, then there is no phone.
+  - Status: playing / forward-seek / reverse-seek → Playing, everything else (stopped too)
+    → Paused. Position extrapolated while playing, clamped below Duration; unknown Duration
+    → length = position + 10 min.
+  - Commands (`phoneAction`): toggle → Pause if the phone plays (fresh read), else Play,
+    **except** while the car takes no audio (`/sys/module/g_ipod_audio/parameters/streaming`
+    = N): then nothing (the source-leave rule, `--toggle-guard`, default on; `?` = no
+    g_ipod_audio, no guard). 10, 7 → Play; 11, 2 → Pause; 3/8/12 → Next; 4/9/13 → Previous;
+    5 → FastForward; 6 → Rewind; 14 ignored. After a successful Play/Pause the cache is set
+    to the expected status until the next read. SetCurrentTrack: later index → Next,
+    earlier → Previous, same (or -1) → Play if asked.
+  - Log per command: `phone: PlayControl toggle (1): car streaming N, phone playing ->
+    paused, action Pause (toggle, the phone plays)`, then `phone: after PlayControl toggle (1)
+    +300ms: phone paused, car streaming N` and the same at +1.5s. Refused toggles:
+    `action none (toggle while the car takes no audio never starts the phone)`.
+  - Track index: the phone's `TrackNumber - 1` of `NumberOfTracks` when Count ≥ 2 and
+    1 ≤ Number ≤ Count, else a list of 4 with the current track at index 1 or 2,
+    alternating on every track change (key: title, artist, album, duration, number,
+    count). `TrackInfo(any index)` = the current track through `textOut`; no title → the
+    phone's name.
+  - `AutoPlayer`: the stub (`DevExtRemote`) and the phone (nil for `--player=stub`). The phone
+    answers while it has a player. On a switch: logged (`player: ...`), `markAll` on the new
+    side; phone → stub sets the stub playing (`DevExtRemote.takeOver`). Inactive side's
+    notifications drained. Notifications enable / Reset go to both. Stub track names:
+    `--demo-track` or the Level 2 placeholders. Stub PlayControls are logged too.
+  - `playerOptions` / `parsePlayerOptions`: the global flags.
+- `cmd/ipod/dbus_phone.go`: `dbusPhones` over godbus, connecting lazily (and again after
+  the bus drops). `Read` = GetManagedObjects (3 s) → `pickPhone`; bluetoothd not running
+  (ServiceUnknown) = no phone, not an error. `Call` = MediaPlayer1.<method> (5 s). `Watch`:
+  PropertiesChanged and ObjectManager signals from org.bluez, NameOwnerChanged for org.bluez.
+  `pickPhone`: MediaPlayer1s of connected devices, preferring MediaControl1.Player, then
+  playing, then by path; name from Alias (Name, Address); codec from the device's
+  MediaTransport1; BlueZ's 0xFFFFFFFF (unknown) Position / Duration → 0.
+- `cmd/ipod/bt.go`: `ipod bt now|next|prev|play|pause|toggle|watch`. Commands are built as an
+  iAP PlayControl and run through `extremote.HandleExtRemote` (the car's code path), then
+  `Wait` (queue done + 1.5 s + one read), printing before and after.
+- `cmd/ipod/main.go`: global flags `--player=auto|stub` (default auto), `--text=asis|translit`
+  (asis), `--text-max` (200), `--demo-track "Title|Artist|Album"`, `--toggle-guard` (on),
+  validated in `app.Before`. `serve` sets `newPlayer` to the AutoPlayer; `processFrames`
+  closes an `io.Closer` Player. The package default `newPlayer` stays the stub (tests never
+  touch a bus). Also removed the unreachable `return nil` in `send` that failed `go vet`.
+- `packet.go`: the small format only up to 255 bytes (`smallPacketMaxLen`). A 256-byte payload
+  used to get length byte 0x00, the large-packet marker, and came out corrupt; tests for 255,
+  256 and a 250–260 round trip (they fail on the old code).
+- Tests: `phone_test.go` (fake phoneSource: action table, fresh-read toggle, guard, command
+  mapping, SetCurrentTrack, index rules and window alternation, position with a fake clock,
+  stale cache, text modes and cap, stub ↔ phone switch and its notifications, demo track,
+  flags; end to end through `processFrames`: car next → `Call("Next")`, the phone's names in
+  GetIndexedPlayingTrackTitle / ArtistName, the index moving), `dbus_phone_test.go`
+  (`pickPhone` on hand-built GetManagedObjects maps), `text_test.go` (translit, truncate).
+  `go vet`, `go test -race ./...` pass; builds for linux/arm64 with CGO_ENABLED=0.
+- `cmd/ipod/scripts/bt-dbusmock-test.py`: `ipod bt` against python-dbusmock's bluez5 with a
+  hand-made iPhone player, on a private system bus (16 checks: now / translit / next / toggle
+  both ways / pause / play / prev / watch from the signal in 0.02 s / disconnected / no
+  bluetoothd).
+- ipod-gadget `level3-wip`: `aucd-bt now|next|prev|play|pause|toggle|watch` exec
+  `/usr/local/bin/ipod $IPOD_GLOBAL_ARGS bt <cmd>` (args from `/etc/default/ipod-client`);
+  `install-rpi.sh` documents the new flags in a fresh `/etc/default/ipod-client`;
+  `doc/q60-notes.md` (the car's controls, open questions); `extras/pi-audio/README.md`
+  Level 3 section (install, desk test, car checklist, rollback).
 
-`go build ./...`, `go vet` and `go test ./...` pass on this branch (WSL, Go 1.24).
+## Not done / to verify on the Pi
 
-## Not done: the design, ready to implement
+- Everything with real hardware: BlueZ's real property types, the iPhone's AVRCP track
+  numbers and how quickly it reports changes, the desk test and the car checklist
+  (`ipod-gadget/extras/pi-audio/README.md`, *Level 3*).
+- The QEMU busybox / fakecar test (a ~180-byte Cyrillic `--demo-track` title through the real
+  gadget as a multi-report iPod → car frame) was not rerun: the rig isn't available in the
+  cloud session.
+- q60-pi-dash `docs/Q60_Pi_Dash_build_guide.md` roadmap (Level 3 status): that repo wasn't
+  reachable from the session; update it by hand.
 
-The plan was agreed with the task spec ("LEVEL 3" message). Pieces, in order:
+## Known risks / open questions (decide from the first car logs)
 
-1. **`cmd/ipod/phone.go`: `BluezPlayer`**, implementing `Player` (+ `extremote.DeviceTrackInfo`,
-   `io.Closer`):
-   - Behind a small interface so tests can fake BlueZ:
-     `phoneSource { Read() (phoneState, error); Call(player, method string) error }`.
-     `phoneState{Name, Address, Player (D-Bus path, "" = none), Status, Position (ms),
-     Track{Title, Artist, Album, Duration, Number, Count}, Codec}`.
-   - **Requests from the car are answered from a cache only, never by a D-Bus call**, so a
-     slow bluetoothd can't stall the iAP replies. A goroutine refreshes the cache on BlueZ
-     signals (`Poke`), every 2 s, and after commands.
-   - Status mapping: playing / forward-seek / reverse-seek -> Playing; paused / stopped /
-     error -> Paused (stopped -> Paused keeps the car's iPod screen sane). Position
-     extrapolated from the read time while playing, clamped below Duration. Unknown
-     Duration -> report position + 10 min (so the car never thinks the track ended).
-   - PlayControl goes into a queue (non-blocking, `sync.WaitGroup busy` for the CLI). The
-     worker **re-reads the phone first, then decides**: toggle (1) -> `Pause` if the phone is
-     playing, else `Play` (never blind); 10 -> Play; 11 and Stop (2) -> Pause; 3/8/12 ->
-     `Next`; 4/9/13 -> `Previous`; 5 -> `FastForward`; 6 -> `Rewind`; 7 -> `Play`; 14 ignored.
-     After the call: an optimistic local status update, then re-reads after 300 ms and
-     1.5 s. Log each one, with the car's streaming state from
-     `/sys/module/g_ipod_audio/parameters/streaming` (evidence for how source-leave toggles
-     line up with alt 0/1).
-   - Track index: the phone's `TrackNumber/NumberOfTracks` when `Count >= 2` and
-     `1 <= Number <= Count` (index = Number-1). Otherwise a window: **4 tracks, current
-     alternating between index 1 and 2 on every track change** (shown as "2 of 4" / "3 of 4"):
-     never at an end, so next/prev stay valid, and the index changes so a car that caches
-     titles by index still refreshes. (The spec suggested 3 with the current in the middle; a
-     constant index risks stale titles. Revisit after seeing the car's requests in the logs.)
-   - Track change (key = Title|Artist|Album|Duration|Number|Count) -> notifier marks
-     TrackIndex + time; state change -> `markState`. `TrackInfo(index)` returns the current
-     track for any index (robust against the car asking for a stale index), through
-     `textOut`; an empty title becomes the phone's name.
-   - `SetCurrentTrack(index, play)`: index above the current -> Next, below -> Previous, same
-     -> Play if `play`.
-
-2. **`AutoPlayer`** (same file): holds the Level 2 stub (`DevExtRemote`) and the
-   `BluezPlayer` (nil without D-Bus). The phone answers while it has a player; otherwise the
-   stub (playing). In `Notifications()`, detect the switch, log it, `markAll` on the
-   new side (so the car refreshes title, state and timer), and drain the inactive side. On
-   phone -> stub, set the stub back to Playing so the car pulls local audio again.
-   `SetPlayStatusNotifications` / `Reset` go to both. `TrackInfo` on the stub: placeholders,
-   or `--demo-track` strings.
-
-3. **`cmd/ipod/dbus_phone.go`: `dbusPhones`** (`phoneSource` over godbus):
-   `ConnectSystemBus`; `Read` = one `GetManagedObjects` (3 s timeout) -> a pure
-   `pickPhone(objs)` (unit-testable): `org.bluez.MediaPlayer1` objects whose `Device` is
-   `Connected`, preferring `MediaControl1.Player`, then status playing, then by path; the
-   name from `Device1.Alias`; codec from `MediaTransport1.Codec` (0 SBC, 2 AAC). `Call` =
-   `org.bluez.MediaPlayer1.<method>` with a 5 s timeout. `Watch(poke)`: match
-   PropertiesChanged and ObjectManager signals from org.bluez, plus NameOwnerChanged for
-   org.bluez. The client runs as root (ipod-client.service has no User=), so the system
-   bus policy allows it.
-
-4. **Flags** (global, validated in `app.Before`): `--player=auto|stub` (default auto; stub =
-   Level 2 behaviour, the no-code rollback lever), `--text=asis|translit`, `--text-max`
-   (bytes, default 200, keeps every packet in the small format), `--demo-track
-   "Title|Artist|Album"` (the stub's names: tests the car's font and long strings without a
-   phone). In `serve`, set `newPlayer` to the AutoPlayer factory. In `processFrames`, `defer
-   Close()` if the Player is an `io.Closer`. Keep the package default `newPlayer` as the
-   stub so tests never touch a real bus.
-
-5. **`ipod bt now|next|prev|play|pause|toggle|watch`** (`cmd/ipod/bt.go`): builds the same
-   AutoPlayer. For the commands it builds an iAP `PlayControl` and runs it through
-   `extremote.HandleExtRemote`, **the car's own code path** (next=3, prev=4, play=10,
-   pause=11, toggle=1). Then `Wait` (busy done + 1.5 s + one re-read) and prints before and
-   after. `now` prints the phone, codec, status, title/artist/album (raw and as sent),
-   time, track n of m, and what the car sees. In ipod-gadget `extras/pi-audio/bin/aucd-bt`,
-   add `now|next|prev|play|pause|toggle|watch` that exec `/usr/local/bin/ipod
-   $IPOD_GLOBAL_ARGS bt <cmd>`, with the args read from `/etc/default/ipod-client`.
-
-6. **Fix in `packet.go`**: `WritePacket` uses the small format up to and including 256
-   bytes (`len(payload) > largePacketMinLen`), but the small length byte only holds 255;
-   **a 256-byte payload is written with length byte 0x00, the large-packet marker, and is
-   corrupt.** The condition should be `> 255`. Add a test. The 200-byte text cap avoids it
-   for titles, but fix it anyway.
-
-7. **Tests**:
-   - Unit tests with a fake `phoneSource`: fallback/switch and its notifications; toggle
-     decided from a fresh read (including a stale cache); command mapping; index rules
-     (phone numbers / window alternation); position extrapolation with a fake clock;
-     TrackInfo text modes and the cap.
-   - An end-to-end test through `processFrames` (chanTransport, as in
-     `extremote_test.go`): car PlayControl next -> fake `Call("Next")`; GetIndexedPlayingTrack*
-     answer the phone's names.
-   - `pickPhone` against hand-built `GetManagedObjects` maps.
-   - Translit / truncate tests.
-   - D-Bus integration in WSL against python-dbusmock (the scratchpad `bt_test.py` pattern):
-     `dbusmock --system --template bluez5` plus a hand-added Device1 (Connected),
-     MediaControl1 and MediaPlayer1 (methods that update Status/Track and emit
-     PropertiesChanged). Run `ipod bt now/next/toggle` built for linux/amd64 and check the
-     mock's call log and the output.
-   - QEMU busybox VM (scratchpad `vm_run.sh`, fakecar): a long Cyrillic `--demo-track`
-     (~180 bytes) answered to GetIndexedPlayingTrackTitle through the real gadget, i.e. a
-     multi-report iPod->car frame, decoded byte for byte by fakecar.
-
-8. **Docs**: `ipod-gadget/doc/q60-notes.md` (the car's control behaviour below);
-   `ipod-gadget/extras/pi-audio/README.md` Level 3 section (desk checklist with `aucd-bt
-   now/next/...`, car checklist, rollback); q60-pi-dash `docs/Q60_Pi_Dash_build_guide.md`
-   roadmap (Level 3 status); this repo's README (`bt`, the new flags).
-
-## The car's behaviour (from Vadym's Level 2 logs, 2026-10-18)
-
-- Next / previous: PlayControl 3 / 4 (steering-wheel up/down, head unit buttons).
-- Pause / resume: **only PlayControl 1 (toggle)**: from the iPod screen's play/pause button,
-  the steering-wheel joystick push while play/pause is highlighted, and **automatically when
-  leaving or returning to the iPod source** (FM, audio off). It never sends 10 (play) or
-  11 (pause).
-- While the client reports Paused, the car stops taking audio (the gadget drops samples
-  cleanly since Level 2).
-- Level 2 works end to end: iPhone -> A2DP (SBC) -> PipeWire -> gadget -> X9U6 -> Bose.
-  The power problem was the power bank browning out; fixed with a 12 V -> 5 V 3 A supply.
-
-## Known problems / open questions
-
-- **Source-leave toggle with the phone already paused**: if the car toggles on leaving the
-  source regardless of state, deciding from the phone's real status would *start* the phone
-  (Play) while the car is on FM. Blind toggling has the same flaw. The PlayControl log line
-  with the car's streaming state (point 1) should show whether toggle and alt 0/1 come in a
-  usable order; a rule like "a toggle while the car is not taking audio never starts the
-  phone" may be needed. Decide from the logs after the first car run.
-- Whether the X9U6 caches track names by index, and whether it enables
-  PlayStatusChangeNotifications at all (look for SetPlayStatusChangeNotification in the
-  client's journal or trace). That decides whether the window alternation is needed.
-- Debian trixie's PipeWire has no AAC Bluetooth codec, so the iPhone uses SBC (Level 2:
-  sounds like wired iPod quality, fine).
-- **Level 4 (album art) note**: GetColorDisplayImageLimits is the accessory asking for the
-  **iPod's** screen size (to upload a logo with SetDisplayImage); it says nothing about the
-  car showing artwork. Artwork *to* the car would be GetArtworkFormats / GetTrackArtworkTimes
-  / GetTrackArtworkData. The client answers GetArtworkFormats with an empty list today.
-  Check the traces for whether the X9U6 sends those, and note the limits it asks for.
-
-## Next concrete step
-
-Write `cmd/ipod/phone.go` (BluezPlayer + AutoPlayer, points 1-2) with its fake-source unit
-tests, then `dbus_phone.go`, the flags and `bt.go`. The test harness pieces (WSL, dbusmock,
-the QEMU VMs) are described in the ipod-gadget memory notes and the scratchpad scripts named
-above. The scratchpad does not survive the session, so recreate the scripts from these
-descriptions if they are gone.
+- **The guard may block resume from the car.** The car stops taking audio while it's told
+  *paused*, so the toggle from its play button (or on returning to the source) may arrive
+  with streaming N and be refused. If so: `--toggle-guard=false`, or a rule from the order the
+  logs show (e.g. allow a toggle within a few seconds of the car selecting the source).
+- Whether the X9U6 enables PlayStatusChangeNotifications, and whether it keeps titles by
+  index (decides whether the window alternation is needed).
+- A track whose Duration arrives late (0, then the real value) counts as a track change: the
+  window flips twice. Harmless unless the car reacts badly; drop Duration from the key then.
+- Debian trixie's PipeWire has no AAC Bluetooth codec: the iPhone uses SBC (fine at Level 2).
+- Level 4 (album art): GetArtworkFormats / GetTrackArtworkTimes / GetTrackArtworkData would be
+  the requests; the client answers GetArtworkFormats with an empty list today.

@@ -22,6 +22,10 @@ func TestPacketWriter_WritePacket(t *testing.T) {
 		{"no-data", []byte{}, nil, true},
 		{"with-data", []byte{0x01, 0x02, 0xfd}, []byte{0x55, 0x03, 0x01, 0x02, 0xfd, 0xfd}, false},
 		{"large-with-data", append([]byte{0x1, 0x02}, largeData...), append([]byte{0x55, 0x00, 0x01, 0x01, 0x1, 0x02}, append(largeData, 0xe9)...), false},
+		// 255 bytes is the most the small format's length byte holds
+		{"small-255", largeData, append([]byte{0x55, 0xff}, append(largeData, 0xef)...), false},
+		// 256 bytes: the large format (a small length byte would be 0x00, the large-packet marker)
+		{"large-256", append([]byte{0x01}, largeData...), append([]byte{0x55, 0x00, 0x01, 0x00, 0x01}, append(largeData, 0xec)...), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -215,5 +219,16 @@ func TestReadPacketLenientAuth(t *testing.T) {
 				t.Fatalf("OnLenient(got=%d, want=%d), want (%d, %d)", got, want, tt.wantGot, tt.wantWant)
 			}
 		})
+	}
+}
+
+// Every payload size around the small/large boundary reads back as written.
+func TestPacketRoundtripSizes(t *testing.T) {
+	for n := 250; n <= 260; n++ {
+		payload := bytes.Repeat([]byte{0x04}, n)
+		got, err := ipod.NewPacketReader(packetOf(payload)).ReadPacket()
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Errorf("%d bytes: read back %d bytes, err %v", n, len(got), err)
+		}
 	}
 }
