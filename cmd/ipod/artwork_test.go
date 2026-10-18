@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oandrew/ipod"
+	"github.com/oandrew/ipod/hid"
 	extremote "github.com/oandrew/ipod/lingo-extremote"
 	general "github.com/oandrew/ipod/lingo-general"
 )
@@ -235,5 +236,73 @@ func TestArtworkOffByDefault(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(playerOpts.String()), []byte("artwork off")) {
 		t.Fatalf("%s", playerOpts)
+	}
+}
+
+// reportCounter counts the HID reports of each frame the encoder writes.
+type reportCounter struct {
+	frames []int
+	inside bool
+}
+
+func (r *reportCounter) WriteReport(rep hid.Report) error {
+	if !r.inside {
+		r.frames = append(r.frames, 0)
+	}
+	r.frames[len(r.frames)-1]++
+	r.inside = rep.LinkControl&hid.LinkControlMoreToFollow != 0
+	return nil
+}
+
+// The Q60 keeps only the first HID report of a picture packet: with artworkChunkFor every
+// packet is one report, for each layout, and the picture still arrives whole.
+func TestArtworkOneReportPerPacket(t *testing.T) {
+	if got := artworkChunkFor(hid.DefaultReportDefs); got != 52 {
+		t.Fatalf("default layout: %d bytes a packet, want 52", got)
+	}
+	if got := artworkChunkFor(hid.LegacyReportDefs); got != 240 {
+		t.Fatalf("legacy layout: %d, want 240 (the small packet format)", got)
+	}
+	art, err := loadArtwork(artworkTest, artworkPixelLE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := extremote.ArtworkChunk
+	defer func() { extremote.ArtworkChunk = prev }()
+	for name, defs := range map[string]hid.ReportDefs{"default": hid.DefaultReportDefs,
+		"bigout": hid.BigOutReportDefs, "legacy": hid.LegacyReportDefs} {
+		extremote.ArtworkChunk = artworkChunkFor(defs)
+		a := newAutoPlayer(NewDevExtRemote(time.Now), nil, textOut{mode: textAsIs}, nil)
+		a.art = art
+		req, _ := ipod.BuildCommand(&extremote.GetTrackArtworkData{FormatID: 1})
+		req.Transaction = ipod.NewTransaction(7)
+		var out ipod.CmdBuffer
+		extremote.HandleExtRemote(req, &out, a)
+
+		serde := ipod.CommandSerde{TrxEnabled: true}
+		counter := &reportCounter{}
+		enc := hid.NewEncoder(counter, defs)
+		var got []byte
+		for _, c := range out.Commands {
+			pkt, err := serde.MarshalCmd(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pw := ipod.NewPacketWriter()
+			pw.WritePacket(pkt)
+			if err := enc.WriteFrame(pw.Bytes()); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, c.Payload.(*extremote.RetTrackArtworkData).Data...)
+		}
+		for i, n := range counter.frames {
+			if n != 1 {
+				t.Fatalf("%s: packet %d took %d reports", name, i, n)
+			}
+		}
+		if !bytes.Equal(got, art.images[1].Pixels) {
+			t.Fatalf("%s: picture not whole (%d bytes)", name, len(got))
+		}
+		t.Logf("%s: %d bytes a packet, %d packets", name, extremote.ArtworkChunk, len(out.Commands))
 	}
 }

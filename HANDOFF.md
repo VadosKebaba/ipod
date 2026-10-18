@@ -128,6 +128,15 @@ connect (Level 4 is worth a try). Steering-wheel "enter" is not a play/pause but
 - Speed: the gadget's HID IN endpoint is polled every 1 ms at full speed, 63 bytes a report:
   about 0.6 s for 128×128, 2 s for 240×240, during which the client answers nothing else.
 
+**First car test (2026-10-18, photo):** the X9U6 shows the art (128×128 picked, colours
+and orientation right with `565le`), but as thin diagonal stripes on junk: it keeps only
+the **first HID report** of each picture packet (52 of 240 bytes; a simulation of exactly
+that matches the photo stripe for stripe), although it reassembles multi-report text
+replies. Fix: `artworkChunkFor` sizes packets to one HID input report (52 bytes with the
+default and bigout layouts, 631 packets for 128×128; 240 with legacy), set in `app.Before`;
+`--artwork-chunk` overrides; `TestArtworkOneReportPerPacket` encodes through the real HID
+encoder and checks every packet is one report.
+
 Step 2, the phone's own covers: BlueZ shows none (`Track` has no `ImgHandle`). AVRCP cover
 art needs bluetoothd to reach obexd (BIP); check whether obexd runs at all on the Pi before
 anything else. Fallback: look covers up online by artist + title.

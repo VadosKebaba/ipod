@@ -176,6 +176,10 @@ func main() {
 			Value: artworkPixelLE,
 			Usage: "the artwork's pixel format: 565le or 565be (RGB 565, byte order)",
 		},
+		cli.IntFlag{
+			Name:  "artwork-chunk",
+			Usage: "picture bytes per artwork packet; 0: as many as fit in one HID report (the Q60 keeps only the first report of a packet)",
+		},
 		cli.BoolTFlag{
 			Name: "toggle-guard",
 			Usage: "a play/pause toggle from the head unit while it takes no audio may pause the phone but never " +
@@ -222,6 +226,13 @@ func main() {
 			c.GlobalString("demo-track"), c.GlobalBoolT("toggle-guard"))
 		if err != nil {
 			return err
+		}
+		extremote.ArtworkChunk = artworkChunkFor(hidReportDefs)
+		if n := c.GlobalInt("artwork-chunk"); n > 0 {
+			if n < 20 || n > 240 {
+				return fmt.Errorf("--artwork-chunk=%d: expected 20 to 240 (0: one HID report)", n)
+			}
+			extremote.ArtworkChunk = n &^ 1
 		}
 		// a bad --artwork costs the picture, not the iPod: the client runs on without it
 		if opts.art, err = loadArtwork(c.GlobalString("artwork"), c.GlobalString("artwork-pixel")); err != nil {

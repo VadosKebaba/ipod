@@ -794,7 +794,11 @@ func (o playerOptions) String() string {
 	if o.demo != nil {
 		s += fmt.Sprintf(", demo track %q", *o.demo)
 	}
-	return s + ", artwork " + o.art.String()
+	s += ", artwork " + o.art.String()
+	if o.art != nil {
+		s += fmt.Sprintf(", %d bytes a packet", extremote.ArtworkChunk)
+	}
+	return s
 }
 
 // newPlayer: an AutoPlayer, with the phone side running for --player=auto.

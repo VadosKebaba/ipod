@@ -47,8 +47,10 @@ type ArtworkImage struct {
 	Pixels  []byte
 }
 
-// ArtworkChunk is the most picture data per RetTrackArtworkData packet: with the header the
-// packet stays in the small (1-byte length) format.
+// ArtworkChunk is the most picture data per RetTrackArtworkData packet (even; packet 0 carries
+// 17 bytes less for its header). 240 keeps a packet in the small (1-byte length) format; the
+// client sets it so a packet fits one HID report, as the Q60's head unit keeps only the first
+// report of a picture packet.
 var ArtworkChunk = 240
 
 func artworkFormats(dev DeviceExtRemote) []ArtworkFormat {

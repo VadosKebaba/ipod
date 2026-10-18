@@ -9,6 +9,7 @@ import (
 	_ "image/png"
 	"os"
 
+	"github.com/oandrew/ipod/hid"
 	extremote "github.com/oandrew/ipod/lingo-extremote"
 )
 
@@ -116,6 +117,26 @@ func artworkTestPattern(size int) image.Image {
 		draw.Draw(img, q.r, image.NewUniform(q.c), image.Point{}, draw.Src)
 	}
 	return img
+}
+
+// artworkChunkFor is the most picture data per RetTrackArtworkData packet for which the
+// whole packet goes in one HID input report of defs. The Q60's Clarion X9U6 keeps only the
+// first report of a picture packet that spans several (car test 2026-10-18: of 240 bytes a
+// packet it drew the first 52, the rest of every packet was junk), although it reassembles
+// multi-report text replies.
+func artworkChunkFor(defs hid.ReportDefs) int {
+	report := 0
+	for _, d := range defs {
+		if d.Dir == hid.ReportDirAccIn && d.MaxPayload() > report {
+			report = d.MaxPayload()
+		}
+	}
+	// a frame: start byte, length, checksum; the packet: lingo, command, transaction, index
+	n := report - 3 - 5 - 2
+	if n > 240 {
+		n = 240 // the small packet format
+	}
+	return n &^ 1
 }
 
 // squareCrop is the largest square in the middle of r.
