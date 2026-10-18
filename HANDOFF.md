@@ -153,9 +153,15 @@ hiccups right after start, then fine; a constant ~0.5 s audio delay (Bluetooth A
 PipeWire + gadget buffering; candidates: PipeWire quantum/headroom in 50-aucd-ipod.conf,
 A2DP delay reporting so the iPhone compensates video).
 
-Step 2, the phone's own covers: BlueZ shows none (`Track` has no `ImgHandle`). AVRCP cover
-art needs bluetoothd to reach obexd (BIP); check whether obexd runs at all on the Pi before
-anything else. Fallback: look covers up online by artist + title.
+Step 2, the phone's own covers: **not available from the iPhone.** With BlueZ 5.82, obexd
+installed and running (user service `obex`), and a fresh connection, the MediaPlayer1 has
+no `ObexPort` and the Track no `ImgHandle` (2026-10-18), so the iPhone offers no AVRCP cover
+art (it gives artwork to CarPlay only). The same fresh connection did show AVRCP browsing
+(`Track.Item` = `.../player1/NowPlaying/item…`, plus `Genre`), so the now-playing queue is
+reachable for real track numbers later, and an Apple Music track with `Duration` 0 (handled:
+length = position + 10 min). Options left for covers: an online lookup by artist + title
+(iTunes Search API, cached on the Pi, needs the phone's hotspot for internet; Vadym is
+thinking about it), AllYouCanDash's own files, or a fixed picture (`--artwork=FILE`, works).
 
 ## Known risks / open questions
 
