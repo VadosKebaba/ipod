@@ -153,6 +153,17 @@ hiccups right after start, then fine; a constant ~0.5 s audio delay (Bluetooth A
 PipeWire + gadget buffering; candidates: PipeWire quantum/headroom in 50-aucd-ipod.conf,
 A2DP delay reporting so the iPhone compensates video).
 
+Looked at (2026-10-18, ipod-gadget branch `claude/inspiring-cannon-4xf4em` on top of
+`level3-wip`; from the PipeWire 1.4.2 source, nothing measured on the Pi yet): the Pi's
+share is ~55 ms on a quiet radio (Bluetooth jitter buffer from 20 ms, iPod output ALSA
+fill, 4 ms USB queue), so most of the 0.5 s is the iPhone and the head unit. The jitter
+buffer starts at 20 ms and grows only after running dry, which matches "a few breaks,
+then fine"; a busy 2.4 GHz radio (hotspot) makes it worse. Changes: headroom 1024 → 512,
+graph cycle fixed at 512, `latency.internal.ns` 4 ms. A2DP delay reporting is already
+done by PipeWire 1.4.2. New `aucd-audio-diag latency|hiccup|logs`. Details, measurements
+to take and how to revert: `ipod-gadget/extras/pi-audio/README.md`, *Latency and
+start-up hiccups*.
+
 Step 2, the phone's own covers: BlueZ shows none (`Track` has no `ImgHandle`). AVRCP cover
 art needs bluetoothd to reach obexd (BIP); check whether obexd runs at all on the Pi before
 anything else. Fallback: look covers up online by artist + title.
