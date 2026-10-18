@@ -369,9 +369,85 @@ type SetPlayStatusChangeNotification struct {
 type SetPlayStatusChangeNotificationShort struct {
 	Enabled bool
 }
-type PlayStatusChangeNotification struct {
-	Status byte // finish
+
+// PlayStatusChange is the first byte of a PlayStatusChangeNotification.
+type PlayStatusChange byte
+
+const (
+	PlayStatusChangeStopped        PlayStatusChange = 0x00 // no data
+	PlayStatusChangeTrackIndex     PlayStatusChange = 0x01 // u32 new track index
+	PlayStatusChangeFFSeekStop     PlayStatusChange = 0x02 // no data
+	PlayStatusChangeRewSeekStop    PlayStatusChange = 0x03 // no data
+	PlayStatusChangeTrackTimeMs    PlayStatusChange = 0x04 // u32 track position, ms
+	PlayStatusChangeChapterIndex   PlayStatusChange = 0x05 // u32 new chapter index
+	PlayStatusChangeExtendedStatus PlayStatusChange = 0x06 // u8 ExtendedPlayStatus
+	PlayStatusChangeTrackTimeSec   PlayStatusChange = 0x07 // u32 track position, s
+)
+
+// PlayStatusChanges is a set of PlayStatusChange codes: bit n is code n.
+type PlayStatusChanges uint32
+
+func (c PlayStatusChanges) Has(code PlayStatusChange) bool {
+	return c&(1<<code) != 0
 }
+
+// PlayStatusChangesShort is what the 1-byte SetPlayStatusChangeNotification enables.
+const PlayStatusChangesShort PlayStatusChanges = 1<<PlayStatusChangeStopped |
+	1<<PlayStatusChangeTrackIndex | 1<<PlayStatusChangeFFSeekStop | 1<<PlayStatusChangeRewSeekStop |
+	1<<PlayStatusChangeTrackTimeMs | 1<<PlayStatusChangeChapterIndex
+
+// PlayStatusChangesFromMask maps the event mask of the 4-byte SetPlayStatusChangeNotification
+// to the notifications it enables. Bits for notifications this package has no code for are ignored.
+func PlayStatusChangesFromMask(mask uint32) PlayStatusChanges {
+	var c PlayStatusChanges
+	bits := []PlayStatusChanges{
+		1<<PlayStatusChangeStopped | 1<<PlayStatusChangeFFSeekStop | 1<<PlayStatusChangeRewSeekStop, // basic
+		1 << PlayStatusChangeExtendedStatus,
+		1 << PlayStatusChangeTrackIndex,
+		1 << PlayStatusChangeTrackTimeMs,
+		1 << PlayStatusChangeTrackTimeSec,
+		1 << PlayStatusChangeChapterIndex,
+	}
+	for i, b := range bits {
+		if mask&(1<<uint(i)) != 0 {
+			c |= b
+		}
+	}
+	return c
+}
+
+// ExtendedPlayStatus is the data of PlayStatusChangeExtendedStatus.
+type ExtendedPlayStatus byte
+
+const (
+	ExtendedPlayStatusStopped        ExtendedPlayStatus = 0x02
+	ExtendedPlayStatusFFSeekStarted  ExtendedPlayStatus = 0x05
+	ExtendedPlayStatusRewSeekStarted ExtendedPlayStatus = 0x06
+	ExtendedPlayStatusSeekStopped    ExtendedPlayStatus = 0x07
+	ExtendedPlayStatusPlaying        ExtendedPlayStatus = 0x0a
+	ExtendedPlayStatusPaused         ExtendedPlayStatus = 0x0b
+)
+
+// PlayStatusChangeNotification is sent by the iPod, if the accessory enabled it with
+// SetPlayStatusChangeNotification. Data depends on Status (see PlayStatusChange).
+type PlayStatusChangeNotification struct {
+	Status PlayStatusChange
+	Data   []byte
+}
+
+func (s *PlayStatusChangeNotification) MarshalBinary() ([]byte, error) {
+	return append([]byte{byte(s.Status)}, s.Data...), nil
+}
+
+func (s *PlayStatusChangeNotification) UnmarshalBinary(data []byte) error {
+	if len(data) < 1 {
+		return io.ErrUnexpectedEOF
+	}
+	s.Status = PlayStatusChange(data[0])
+	s.Data = append([]byte(nil), data[1:]...)
+	return nil
+}
+
 type PlayCurrentSelection struct {
 	SelectedTrackIndex int32
 }
@@ -392,6 +468,7 @@ const (
 	PlayControlPause       PlayControlCmd = 0x0b
 	PlayControlNextChapter PlayControlCmd = 0x0c
 	PlayControlPrevChapter PlayControlCmd = 0x0d
+	PlayControlResumeIPod  PlayControlCmd = 0x0e
 )
 
 type PlayControl struct {

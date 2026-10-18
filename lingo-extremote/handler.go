@@ -4,8 +4,18 @@ import (
 	"github.com/oandrew/ipod"
 )
 
+// DeviceExtRemote is the player the Extended Remote lingo controls and reports on.
+// With dev == nil HandleExtRemote answers with fixed placeholders.
 type DeviceExtRemote interface {
 	PlaybackStatus() (trackLength, trackPos uint32, state PlayerState)
+	// CurrentTrack returns the playing track's index in the playing list and the list's length.
+	CurrentTrack() (index int32, numTracks uint32)
+	PlayControl(cmd PlayControlCmd)
+	// SetCurrentTrack moves to track index (-1: the first one) at position 0, and starts
+	// playing if play is set.
+	SetCurrentTrack(index int32, play bool)
+	// SetPlayStatusNotifications sets which PlayStatusChangeNotifications the accessory wants.
+	SetPlayStatusNotifications(enabled PlayStatusChanges)
 }
 
 func ackSuccess(req *ipod.Command) *ACK {
@@ -46,9 +56,13 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 		var info interface{}
 		switch msg.InfoType {
 		case TrackInfoCaps:
+			var trackLength uint32 = 300 * 1000
+			if dev != nil {
+				trackLength, _, _ = dev.PlaybackStatus()
+			}
 			info = &TrackCaps{
 				Caps:         0x0,
-				TrackLength:  300 * 1000,
+				TrackLength:  trackLength,
 				ChapterCount: 1,
 			}
 		case TrackInfoDescription, TrackInfoLyrics:
@@ -85,14 +99,22 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 	case *RetrieveCategorizedDatabaseRecords:
 		ipod.Respond(req, tr, &ReturnCategorizedDatabaseRecord{})
 	case *GetPlayStatus:
-		ipod.Respond(req, tr, &ReturnPlayStatus{
+		status := &ReturnPlayStatus{
 			TrackLength:   300 * 1000,
 			TrackPosition: 20 * 1000,
 			State:         PlayerStatePaused,
-		})
+		}
+		if dev != nil {
+			status.TrackLength, status.TrackPosition, status.State = dev.PlaybackStatus()
+		}
+		ipod.Respond(req, tr, status)
 	case *GetCurrentPlayingTrackIndex:
+		var index int32
+		if dev != nil {
+			index, _ = dev.CurrentTrack()
+		}
 		ipod.Respond(req, tr, &ReturnCurrentPlayingTrackIndex{
-			TrackIndex: 0,
+			TrackIndex: index,
 		})
 	case *GetIndexedPlayingTrackTitle:
 		ipod.Respond(req, tr, &ReturnIndexedPlayingTrackTitle{
@@ -107,12 +129,28 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 			AlbumName: ipod.StringToBytes("album"),
 		})
 	case *SetPlayStatusChangeNotification:
+		if dev != nil {
+			dev.SetPlayStatusNotifications(PlayStatusChangesFromMask(msg.EventMask))
+		}
 		ipod.Respond(req, tr, ackSuccess(req))
 	case *SetPlayStatusChangeNotificationShort:
+		if dev != nil {
+			var enabled PlayStatusChanges
+			if msg.Enabled {
+				enabled = PlayStatusChangesShort
+			}
+			dev.SetPlayStatusNotifications(enabled)
+		}
 		ipod.Respond(req, tr, ackSuccess(req))
 	case *PlayCurrentSelection:
+		if dev != nil {
+			dev.SetCurrentTrack(msg.SelectedTrackIndex, true)
+		}
 		ipod.Respond(req, tr, ackSuccess(req))
 	case *PlayControl:
+		if dev != nil {
+			dev.PlayControl(msg.Cmd)
+		}
 		ipod.Respond(req, tr, ackSuccess(req))
 	case *GetTrackArtworkTimes:
 		ipod.Respond(req, tr, &RetTrackArtworkTimes{})
@@ -135,10 +173,18 @@ func HandleExtRemote(req *ipod.Command, tr ipod.CommandWriter, dev DeviceExtRemo
 			PixelFormat: 0x01,
 		})
 	case *GetNumPlayingTracks:
+		var numTracks uint32 = 1
+		if dev != nil {
+			_, numTracks = dev.CurrentTrack()
+		}
 		ipod.Respond(req, tr, &ReturnNumPlayingTracks{
-			NumTracks: 1,
+			NumTracks: numTracks,
 		})
 	case *SetCurrentPlayingTrack:
+		if dev != nil {
+			dev.SetCurrentTrack(msg.TrackIndex, false)
+		}
+		ipod.Respond(req, tr, ackSuccess(req))
 	case *SelectSortDBRecord:
 	case *GetColorDisplayImageLimits:
 		ipod.Respond(req, tr, &ReturnColorDisplayImageLimits{

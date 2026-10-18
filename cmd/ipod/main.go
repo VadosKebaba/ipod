@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"sync"
 	"time"
 
 	"os"
@@ -34,6 +36,35 @@ func openDevice(path string) (*os.File, error) {
 		return nil, fmt.Errorf("not a char device")
 	}
 	return f, nil
+}
+
+// deviceFile is the iap device (g_ipod_hid's /dev/iapN). Its read() and write() share one
+// mutex, and Go opens the device non-blocking: a write() that runs into a pending read() fails
+// with EAGAIN, and Go then waits for the device's next wake-up, which may only be the head
+// unit's next report. Notifications are written while a read is pending, so writes retry on a
+// short deadline instead.
+type deviceFile struct {
+	*os.File
+}
+
+const deviceWriteRetry = 100 * time.Millisecond
+
+func (f deviceFile) Write(p []byte) (int, error) {
+	written := 0
+	for {
+		if err := f.SetWriteDeadline(time.Now().Add(deviceWriteRetry)); err != nil {
+			// not pollable: blocking write
+			n, err := f.File.Write(p[written:])
+			return written + n, err
+		}
+		n, err := f.File.Write(p[written:])
+		written += n
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			log.Debugf("device write waited %v, retrying", deviceWriteRetry)
+			continue
+		}
+		return written, err
+	}
 }
 
 func openTraceFile(path string) (*os.File, error) {
@@ -188,7 +219,7 @@ func main() {
 				}
 				le.Info("device opened")
 
-				var rw io.ReadWriter = f
+				var rw io.ReadWriter = deviceFile{f}
 				if tracePath := c.String("write-trace"); tracePath != "" {
 					traceFile, err := newTraceFile(tracePath)
 					le := log.WithField("path", tracePath)
@@ -197,7 +228,7 @@ func main() {
 						return err
 					}
 					le.Warningf("writing trace")
-					rw = trace.NewTracer(traceFile, f)
+					rw = trace.NewTracer(traceFile, deviceFile{f})
 				}
 
 				reportR, reportW := hid.NewReportReader(rw), hid.NewReportWriter(rw)
@@ -291,7 +322,7 @@ func main() {
 				tr := trace.NewReader(tf)
 				tdr := trace.NewTraceDirReader(tr, trace.DirIn)
 
-				var rw io.ReadWriter = f
+				var rw io.ReadWriter = deviceFile{f}
 				if tracePath := c.String("write-trace"); tracePath != "" {
 					traceFile, err := newTraceFile(tracePath)
 					le := log.WithField("path", tracePath)
@@ -300,7 +331,7 @@ func main() {
 						return err
 					}
 					le.Warningf("writing trace")
-					rw = trace.NewTracer(traceFile, f)
+					rw = trace.NewTracer(traceFile, deviceFile{f})
 				}
 				reportR, reportW := hid.NewReportReader(rw), hid.NewReportWriter(rw)
 				dummyW := hid.NewReportWriter(ioutil.Discard)
@@ -373,8 +404,29 @@ func logCmd(cmd *ipod.Command, err error, msg string) {
 
 }
 
+// notifyInterval is how often PlayStatusChangeNotifications go out (an iPod: about 500 ms).
+var notifyInterval = 500 * time.Millisecond
+
+// session is one processFrames run. Replies (processFrames) and notifications (notify) are
+// sent from two goroutines, so anything that uses the serde or writes frames holds mu.
+type session struct {
+	mu    sync.Mutex
+	serde ipod.CommandSerde
+	w     ipod.FrameWriter
+	ext   *DevExtRemote
+}
+
 func processFrames(frameTransport ipod.FrameReadWriter) {
-	serde := ipod.CommandSerde{}
+	s := &session{w: frameTransport, ext: NewDevExtRemote(time.Now)}
+	var notifier sync.WaitGroup
+	done := make(chan struct{})
+	notifier.Add(1)
+	go func() {
+		defer notifier.Done()
+		s.notify(done)
+	}()
+	defer notifier.Wait()
+	defer close(done)
 
 	for {
 		inFrame, err := frameTransport.ReadFrame()
@@ -385,57 +437,105 @@ func processFrames(frameTransport ipod.FrameReadWriter) {
 		if err != nil {
 			continue
 		}
-
-		packetReader := newPacketReader(inFrame)
-		inCmdBuf := ipod.CmdBuffer{}
-		for {
-			inPacket, err := packetReader.ReadPacket()
-			if err == io.EOF {
-				break
-			}
-			logPacket(inPacket, err, "<< PACKET")
-			if err != nil {
-				continue
-			}
-
-			inCmd, err := serde.UnmarshalCmd(inPacket)
-			logCmd(inCmd, err, "<< CMD")
-			inCmdBuf.WriteCommand(inCmd)
-		}
-
-		outCmdBuf := ipod.CmdBuffer{}
-		for i := range inCmdBuf.Commands {
-			//todo: check return error
-			handlePacket(&outCmdBuf, inCmdBuf.Commands[i])
-		}
-
-		for i := range outCmdBuf.Commands {
-			outCmd := outCmdBuf.Commands[i]
-			logCmd(outCmd, nil, ">> CMD")
-
-			outPacket, err := serde.MarshalCmd(outCmd)
-			logPacket(outPacket, err, ">> PACKET")
-
-			packetWriter := ipod.NewPacketWriter()
-			packetWriter.WritePacket(outPacket)
-			outFrame := packetWriter.Bytes()
-			outFrameErr := frameTransport.WriteFrame(outFrame)
-			logFrame(outFrame, outFrameErr, ">> FRAME")
-		}
-
+		s.handleFrame(inFrame)
 	}
 	log.Warnf("EOF")
 }
 
+func (s *session) handleFrame(inFrame []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	packetReader := newPacketReader(inFrame)
+	inCmdBuf := ipod.CmdBuffer{}
+	for {
+		inPacket, err := packetReader.ReadPacket()
+		if err == io.EOF {
+			break
+		}
+		logPacket(inPacket, err, "<< PACKET")
+		if err != nil {
+			continue
+		}
+
+		inCmd, err := s.serde.UnmarshalCmd(inPacket)
+		logCmd(inCmd, err, "<< CMD")
+		inCmdBuf.WriteCommand(inCmd)
+	}
+
+	outCmdBuf := ipod.CmdBuffer{}
+	for i := range inCmdBuf.Commands {
+		//todo: check return error
+		handlePacket(&outCmdBuf, inCmdBuf.Commands[i], s.ext)
+	}
+
+	for i := range outCmdBuf.Commands {
+		s.send(outCmdBuf.Commands[i], true)
+	}
+}
+
+// send writes cmd as one frame. Unless verbose only failures are logged: the track position
+// notifications go out twice a second while playing.
+func (s *session) send(outCmd *ipod.Command, verbose bool) {
+	if verbose {
+		logCmd(outCmd, nil, ">> CMD")
+	}
+
+	outPacket, err := s.serde.MarshalCmd(outCmd)
+	if verbose || err != nil {
+		logPacket(outPacket, err, ">> PACKET")
+	}
+
+	packetWriter := ipod.NewPacketWriter()
+	packetWriter.WritePacket(outPacket)
+	outFrame := packetWriter.Bytes()
+	outFrameErr := s.w.WriteFrame(outFrame)
+	if verbose || outFrameErr != nil {
+		logFrame(outFrame, outFrameErr, ">> FRAME")
+	}
+}
+
+// notify sends the PlayStatusChangeNotifications the head unit enabled, every notifyInterval,
+// until done is closed.
+func (s *session) notify(done <-chan struct{}) {
+	t := time.NewTicker(notifyInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+		// under mu: nothing computed before a command changes the state goes out after its reply
+		s.mu.Lock()
+		notes := s.ext.Notifications()
+		cmds := ipod.CmdBuffer{}
+		for _, n := range notes {
+			ipod.Send(&cmds, n)
+		}
+		for i, cmd := range cmds.Commands {
+			periodic := notes[i].Status == extremote.PlayStatusChangeTrackTimeMs ||
+				notes[i].Status == extremote.PlayStatusChangeTrackTimeSec
+			s.send(cmd, !periodic)
+		}
+		s.mu.Unlock()
+	}
+}
+
 var devGeneral = &DevGeneral{}
 
-func handlePacket(cmdWriter ipod.CommandWriter, cmd *ipod.Command) {
+func handlePacket(cmdWriter ipod.CommandWriter, cmd *ipod.Command, ext *DevExtRemote) {
 	switch cmd.ID.LingoID() {
 	case ipod.LingoGeneralID:
 		if auth, ok := cmd.Payload.(*general.RetDevAuthenticationInfo); ok {
 			if auth.Major >= 2 && auth.CertCurrentSection >= auth.CertMaxSection || auth.Major < 2 {
 				audio.Start(cmdWriter)
 			}
+		}
+		switch cmd.Payload.(type) {
+		case *general.StartIDPS, *general.IdentifyDeviceLingoes:
+			// the head unit (re)connects
+			ext.Reset()
 		}
 		general.HandleGeneral(cmd, cmdWriter, devGeneral)
 
@@ -445,7 +545,7 @@ func handlePacket(cmdWriter ipod.CommandWriter, cmd *ipod.Command) {
 	case ipod.LingoDisplayRemoteID:
 		dispremote.HandleDispRemote(cmd, cmdWriter, nil)
 	case ipod.LingoExtRemoteID:
-		extremote.HandleExtRemote(cmd, cmdWriter, nil)
+		extremote.HandleExtRemote(cmd, cmdWriter, ext)
 	case ipod.LingoDigitalAudioID:
 		audio.HandleAudio(cmd, cmdWriter, nil)
 	}
