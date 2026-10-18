@@ -137,6 +137,18 @@ default and bigout layouts, 631 packets for 128×128; 240 with legacy), set in `
 `--artwork-chunk` overrides; `TestArtworkOneReportPerPacket` encodes through the real HID
 encoder and checks every packet is one report.
 
+Log of that run (old build, 240-byte packets): on every track change the car asks caps
+(info 0), artwork count (info 7), GetTrackArtworkTimes, then ~300 ms later
+GetTrackArtworkData for format 1 (128×128, 32768 bytes); no retries or errors. Sending took
+1.22 s for 137 packets = 685 HID reports, i.e. ~1.8 ms a report (not the 1 ms the endpoint
+interval allows). The one-report build sends 631 reports: expect ~1.1–1.3 s, unless the car
+also spends time per packet; check `artwork: sent ...` in the next log.
+
+Reported by Vadym after several drives (2026-10-18), for later: one or a few audio
+hiccups right after start, then fine; a constant ~0.5 s audio delay (Bluetooth A2DP +
+PipeWire + gadget buffering; candidates: PipeWire quantum/headroom in 50-aucd-ipod.conf,
+A2DP delay reporting so the iPhone compensates video).
+
 Step 2, the phone's own covers: BlueZ shows none (`Track` has no `ImgHandle`). AVRCP cover
 art needs bluetoothd to reach obexd (BIP); check whether obexd runs at all on the Pi before
 anything else. Fallback: look covers up online by artist + title.
